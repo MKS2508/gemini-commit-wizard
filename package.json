@@ -1,0 +1,66 @@
+{
+  "name": "gemini-commit-wizard",
+  "version": "1.0.0",
+  "description": "AI-powered Git commit generation with Google Gemini CLI",
+  "main": "src/commit-generator.ts",
+  "type": "module",
+  "scripts": {
+    "commit": "bun src/commit-ui.ts",
+    "commit:quick": "bun src/commit-ui.ts --quick",
+    "commit:manual": "bun src/commit-generator.ts",
+    "commit:auto": "bun src/commit-generator.ts --auto-approve",
+    "version": "bun src/version-manager.ts",
+    "version:minor": "bun src/version-manager.ts --type minor",
+    "version:major": "bun src/version-manager.ts --type major",
+    "version:patch": "bun src/version-manager.ts --type patch",
+    "version:alpha": "bun src/version-manager.ts --prefix alpha",
+    "version:beta": "bun src/version-manager.ts --prefix beta",
+    "version:sync": "bun src/version-manager.ts --sync",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "git",
+    "commit",
+    "ai",
+    "gemini",
+    "automation",
+    "cli",
+    "typescript",
+    "bun",
+    "developer-tools"
+  ],
+  "author": "MKS2508",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MKS2508/gemini-commit-wizard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MKS2508/gemini-commit-wizard/issues"
+  },
+  "homepage": "https://github.com/MKS2508/gemini-commit-wizard#readme",
+  "engines": {
+    "bun": ">=1.0.0",
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "bun": ">=1.0.0"
+  },
+  "files": [
+    "src/**/*",
+    ".run/**/*",
+    "README.md",
+    "CLAUDE.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "gemini-commit": "./src/commit-ui.ts",
+    "gemini-commit-gen": "./src/commit-generator.ts",
+    "gemini-version": "./src/version-manager.ts"
+  }
+}
