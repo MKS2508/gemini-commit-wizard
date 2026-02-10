@@ -1,7 +1,7 @@
 {
   "name": "gemini-commit-wizard",
-  "version": "1.0.0",
-  "description": "AI-powered Git commit generation with Google Gemini CLI",
+  "version": "1.1.2",
+  "description": "AI-powered Git commit generation with multi-provider support (Gemini, Groq, OpenRouter)",
   "main": "src/commit-generator.ts",
   "type": "module",
   "scripts": {
@@ -23,6 +23,11 @@
     "commit",
     "ai",
     "gemini",
+    "groq",
+    "openrouter",
+    "claude",
+    "llama",
+    "multi-provider",
     "automation",
     "cli",
     "typescript",
@@ -43,7 +48,11 @@
     "bun": ">=1.0.0",
     "node": ">=18.0.0"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@google/genai": "^1.40.0",
+    "groq-sdk": "^0.37.0",
+    "@openrouter/sdk": "^0.3.12"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0"

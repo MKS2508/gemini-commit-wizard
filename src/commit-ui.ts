@@ -192,6 +192,17 @@ class CommitUI {
       args.push("--performance-impact", options.performanceImpact)
     }
 
+    // Pass through --provider and --model from CLI args
+    const cliArgs = process.argv.slice(2)
+    const providerIdx = cliArgs.indexOf("--provider")
+    if (providerIdx > -1 && cliArgs[providerIdx + 1]) {
+      args.push("--provider", cliArgs[providerIdx + 1])
+    }
+    const modelIdx = cliArgs.indexOf("--model")
+    if (modelIdx > -1 && cliArgs[modelIdx + 1]) {
+      args.push("--model", cliArgs[modelIdx + 1])
+    }
+
     console.log("\n🔄 Generating commit...")
     console.log(`📋 Context: ${options.context}`)
     console.log(`🏷️ Type: ${options.workType}`)
@@ -200,7 +211,7 @@ class CommitUI {
 
     const command = `bun src/commit-generator.ts ${args.join(" ")} --auto-approve`
     console.log(`\n🚀 Running: ${command}`)
-    
+
     try {
       execSync(command, { stdio: 'inherit' })
       console.log("✅ Commits executed successfully!")

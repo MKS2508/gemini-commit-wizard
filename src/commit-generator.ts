@@ -6,9 +6,10 @@
  * siguiendo los patrones establecidos para el proyecto EL Haido TPV
  */
 
-import { spawn } from 'bun';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { createCommitPrompt, GeminiResponseParser, TPV_PROJECT_CONFIG, type GeminiPromptConfig } from './prompt-templates';
+import { createCommitPrompt, GeminiResponseParser, type GeminiPromptConfig } from './prompt-templates';
+import { createProvider, listProviders, type IAIProvider, type ProviderName } from './providers';
+import { loadProjectConfig, type IProjectConfig } from './project-config';
 import { join } from 'path';
 
 interface FileChange {
@@ -53,12 +54,25 @@ class CommitGenerator {
   private tempDir: string;
   private autoApprove: boolean;
   private noPush: boolean;
+  private provider: IAIProvider;
+  private projectConfig: IProjectConfig;
 
-  constructor() {
+  constructor(providerName?: string, modelOverride?: string) {
     this.projectRoot = process.cwd();
     this.tempDir = join(this.projectRoot, '.temp');
     this.autoApprove = process.argv.includes('--auto-approve');
     this.noPush = process.argv.includes('--no-push');
+
+    // Load project config (may specify default provider/model)
+    this.projectConfig = loadProjectConfig(this.projectRoot);
+
+    // Resolve provider: CLI arg > config file > auto-detect
+    const resolvedProvider = providerName || this.projectConfig.provider;
+    const resolvedModel = modelOverride || this.projectConfig.model;
+    this.provider = createProvider(resolvedProvider, resolvedModel);
+
+    console.log(`🤖 AI Provider: ${this.provider.name} (${this.provider.model})`);
+
     this.ensureTempDir();
   }
 
@@ -240,10 +254,10 @@ class CommitGenerator {
       files,
       stats,
       project_context: {
-        name: 'OpenTUI',
-        description: 'Modern Terminal User Interface Framework',
-        tech_stack: ['TypeScript', 'Node.js', 'Terminal UI', 'CLI'],
-        target_platform: 'Cross-platform (macOS, Linux, Windows)',
+        name: this.projectConfig.name,
+        description: this.projectConfig.description,
+        tech_stack: this.projectConfig.techStack,
+        target_platform: this.projectConfig.targetPlatform,
       },
       commit_patterns: commitPatterns,
     };
@@ -252,14 +266,16 @@ class CommitGenerator {
   private createStandardPrompt(analysis: CommitAnalysis, extraContext: string = ''): string {
     const config: GeminiPromptConfig = {
       projectContext: {
-        name: TPV_PROJECT_CONFIG.name,
-        description: TPV_PROJECT_CONFIG.description,
-        version: TPV_PROJECT_CONFIG.version,
-        techStack: [...TPV_PROJECT_CONFIG.techStack],
-        targetPlatform: TPV_PROJECT_CONFIG.targetPlatform,
+        name: this.projectConfig.name,
+        description: this.projectConfig.description,
+        version: this.projectConfig.version,
+        techStack: [...this.projectConfig.techStack],
+        targetPlatform: this.projectConfig.targetPlatform,
       },
       analysisType: 'commit',
       specificContext: extraContext,
+      components: this.projectConfig.components,
+      commitFormat: this.projectConfig.commitFormat,
       data: {
         stats: analysis.stats,
         files: analysis.files.map(file => ({
@@ -280,14 +296,16 @@ class CommitGenerator {
   private createExhaustivePrompt(analysis: CommitAnalysis, extraContext: string = ''): string {
     const config: GeminiPromptConfig = {
       projectContext: {
-        name: TPV_PROJECT_CONFIG.name,
-        description: TPV_PROJECT_CONFIG.description,
-        version: TPV_PROJECT_CONFIG.version,
-        techStack: [...TPV_PROJECT_CONFIG.techStack],
-        targetPlatform: TPV_PROJECT_CONFIG.targetPlatform,
+        name: this.projectConfig.name,
+        description: this.projectConfig.description,
+        version: this.projectConfig.version,
+        techStack: [...this.projectConfig.techStack],
+        targetPlatform: this.projectConfig.targetPlatform,
       },
       analysisType: 'commit',
       specificContext: `MODO EXHAUSTIVO: Análisis profundo requerido.\n${extraContext}`,
+      components: this.projectConfig.components,
+      commitFormat: this.projectConfig.commitFormat,
       data: {
         mode: 'exhaustive',
         stats: analysis.stats,
@@ -371,10 +389,10 @@ class CommitGenerator {
   }
 
   /**
-   * Invoca Gemini CLI con el contexto de análisis
+   * Invoca el AI provider con el contexto de análisis
    */
-  private async analyzeWithGemini(analysis: CommitAnalysis, exhaustive: boolean = false, extraContext: string = ''): Promise<string> {
-    console.log(`🤖 Analizando cambios con Gemini CLI... ${exhaustive ? '(Modo Exhaustivo)' : ''}`);
+  private async analyzeWithAI(analysis: CommitAnalysis, exhaustive: boolean = false, extraContext: string = ''): Promise<string> {
+    console.log(`🤖 Analizando cambios con ${this.provider.name}... ${exhaustive ? '(Modo Exhaustivo)' : ''}`);
 
     const prompt = exhaustive
       ? this.createExhaustivePrompt(analysis, extraContext)
@@ -385,33 +403,19 @@ class CommitGenerator {
     writeFileSync(contextPath, JSON.stringify(analysis, null, 2));
 
     // Guardar el prompt en un archivo temporal
-    const promptPath = join(this.tempDir, 'gemini-prompt.txt');
+    const promptPath = join(this.tempDir, 'prompt.txt');
     writeFileSync(promptPath, prompt);
 
     try {
-      // Ejecutar Gemini CLI
-      const geminiResult = Bun.spawnSync(['gemini'], {
-        cwd: this.projectRoot,
-        stdin: Buffer.from(prompt) as any,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
+      const response = await this.provider.generate(prompt);
 
-      if (geminiResult.exitCode !== 0) {
-        const error = geminiResult.stderr?.toString() || 'Gemini CLI failed';
-        throw new Error(`Gemini CLI error: ${error}`);
-      }
-
-      const response = geminiResult.stdout?.toString() || '';
-      
       // Guardar la respuesta
-      const responsePath = join(this.tempDir, 'gemini-response.md');
+      const responsePath = join(this.tempDir, 'response.md');
       writeFileSync(responsePath, response);
 
       return response;
     } catch (error) {
-      console.error('❌ Error ejecutando Gemini CLI:', error);
-      console.log('💡 Verifica que Gemini CLI esté instalado y configurado');
+      console.error(`❌ Error with ${this.provider.name}:`, error);
       console.log('📝 Contexto guardado en:', contextPath);
       console.log('📝 Prompt guardado en:', promptPath);
       throw error;
@@ -638,8 +642,8 @@ class CommitGenerator {
         breakingChanges
       );
 
-      // Analizar con Gemini
-      const commitProposal = await this.analyzeWithGemini(analysis, exhaustiveMode, enhancedContext);
+      // Analizar con AI provider
+      const commitProposal = await this.analyzeWithAI(analysis, exhaustiveMode, enhancedContext);
       
       // Guardar propuesta
       const proposalPath = this.saveCommitProposal(commitProposal);
@@ -711,18 +715,21 @@ class CommitGenerator {
 // Ejecutar el generador si se llama directamente
 if (import.meta.main) {
   const args = process.argv.slice(2);
-  
+
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
-🚀 Generador Automático de Commits con Gemini CLI
+🚀 Generador Automático de Commits con AI
 
 Analiza cambios del repositorio y genera commits coherentes siguiendo los patrones del proyecto.
+Soporta múltiples providers de AI: Gemini CLI, Gemini SDK, Groq, OpenRouter.
 
 Uso:
   bun src/commit-generator.ts [opciones]
 
 Opciones:
-  --auto-approve                Ejecutar automáticamente los commits propuestos y hacer push
+  --provider <name>            Provider: gemini-cli|gemini-sdk|groq|openrouter (auto-detect if omitted)
+  --model <model-id>           Model override (e.g. "llama-3.3-70b-versatile", "anthropic/claude-sonnet-4")
+  --auto-approve               Ejecutar automáticamente los commits propuestos y hacer push
   --no-push                    Con --auto-approve, no hacer push (solo commits locales)
   --extra <texto>              Contexto adicional para mejorar el análisis
   --context <descripción>      Descripción del trabajo actual
@@ -731,34 +738,61 @@ Opciones:
   --performance-impact <tipo>  Impacto: mejora|neutro|regresion
   --breaking-changes <si|no>   Si introduce cambios incompatibles
   --exhaustive                 Análisis exhaustivo para proyectos complejos (automático si >50 archivos)
+  --list-providers             List all available AI providers and exit
   --help, -h                   Mostrar esta ayuda
 
+Provider auto-detection (when --provider is omitted):
+  1. GEMINI_API_KEY set  → Gemini SDK
+  2. GROQ_API_KEY set    → Groq (fastest)
+  3. OPENROUTER_API_KEY  → OpenRouter (300+ models)
+  4. gemini binary found → Gemini CLI
+
+Configuration:
+  Config loaded from .commit-wizard.json or package.json "commitWizard" key.
+  Set default provider/model in config to avoid --provider flag every time.
+
 Ejemplos:
-  bun run commit                                    # Generar propuesta básica
-  bun run commit --auto-approve                     # Ejecutar automáticamente
-  bun run commit --context "sistema de productos"  # Con descripción del trabajo
-  bun run commit --work-type feature --context "carrito de compras" # Feature específica
-  bun run commit --work-type bugfix --affected-components "checkout,pagos" # Bug fix
-  bun run commit --performance-impact mejora --work-type performance # Optimización
-  bun run commit --breaking-changes si --work-type refactor # Refactor mayor
-  bun run commit --exhaustive --auto-approve       # Análisis completo y ejecución
-
-Modo Auto-Approve:
-- Valida estado del repositorio (rama master, sin conflictos)
-- Parsea commits propuestos por Gemini AI
-- Ejecuta cada commit secuencialmente con archivos apropiados
-- Hace push automático a origin/master (excepto con --no-push)
-- Manejo de errores y rollback en caso de fallos
-
-Seguridad:
-- Solo funciona en rama master
-- Validación de conflictos antes de ejecutar
-- Commits atómicos con manejo de errores individual
-- Logs completos de todas las operaciones
+  bun run commit --auto-approve                                    # Auto-detect provider
+  bun run commit --provider groq --auto-approve                    # Use Groq
+  bun run commit --provider openrouter --model anthropic/claude-sonnet-4  # Use Claude via OpenRouter
+  bun run commit --context "auth system" --work-type feature       # With context
 `);
     process.exit(0);
   }
-  
-  const generator = new CommitGenerator();
+
+  // Handle --list-providers
+  if (args.includes('--list-providers')) {
+    console.log('\n📋 Available AI Providers:\n');
+    for (const p of listProviders()) {
+      const status = p.available ? '✅' : '❌';
+      console.log(`  ${status} ${p.name} (${p.id})`);
+      if (!p.available) {
+        console.log(`     → ${p.requirement}`);
+      }
+    }
+    console.log('');
+    process.exit(0);
+  }
+
+  // Parse --provider and --model args
+  let providerArg: string | undefined;
+  let modelArg: string | undefined;
+
+  const providerIndex = args.indexOf('--provider');
+  if (providerIndex > -1 && args[providerIndex + 1]) {
+    providerArg = args[providerIndex + 1];
+  }
+
+  const modelIndex = args.indexOf('--model');
+  if (modelIndex > -1 && args[modelIndex + 1]) {
+    modelArg = args[modelIndex + 1];
+  }
+
+  // Also check COMMIT_WIZARD_PROVIDER env var
+  if (!providerArg && process.env.COMMIT_WIZARD_PROVIDER) {
+    providerArg = process.env.COMMIT_WIZARD_PROVIDER;
+  }
+
+  const generator = new CommitGenerator(providerArg, modelArg);
   await generator.generate();
 }

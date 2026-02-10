@@ -1,7 +1,7 @@
 /**
- * Plantillas de prompts estandarizadas para Gemini CLI
- * @description Asegura respuestas consistentes y parseables en todos los scripts
- * @author TPV EL Haido
+ * Plantillas de prompts estandarizadas para AI commit analysis.
+ * @description Asegura respuestas consistentes y parseables en todos los scripts.
+ *   Supports dynamic project configuration — no longer hardcoded to a single project.
  */
 
 export interface GeminiPromptConfig {
@@ -19,6 +19,15 @@ export interface GeminiPromptConfig {
   specificContext?: string;
   /** Datos estructurados para el análisis */
   data?: any;
+  /** Project component map for monorepo awareness */
+  components?: Array<{ id: string; path: string; name: string }>;
+  /** Commit format preferences */
+  commitFormat?: {
+    titleLanguage?: string;
+    bodyLanguage?: string;
+    includeTechnical?: boolean;
+    includeChangelog?: boolean;
+  };
 }
 
 export interface StandardResponseFormat {
@@ -31,22 +40,24 @@ export interface StandardResponseFormat {
 }
 
 /**
- * Configuración base del proyecto OpenTUI
+ * Default project config used as fallback when no config is loaded.
+ * @deprecated Use loadProjectConfig() from project-config.ts instead.
  */
 export const TPV_PROJECT_CONFIG = {
-  name: 'OpenTUI',
-  description: 'Modern Terminal User Interface Framework',
-  version: '0.1.0',
-  techStack: ['TypeScript', 'Node.js', 'Terminal UI', 'CLI'] as const,
-  targetPlatform: 'Cross-platform (macOS, Linux, Windows)',
+  name: 'Unknown Project',
+  description: 'Software project',
+  version: '0.0.0',
+  techStack: ['TypeScript'] as const,
+  targetPlatform: 'Cross-platform',
 } as const;
 
 /**
- * Prefijo estándar para todos los prompts de Gemini
+ * Generate the standard prompt prefix with dynamic project context.
  */
-const STANDARD_PROMPT_PREFIX = `# Sistema de Análisis Inteligente - OpenTUI
+function createPromptPrefix(ctx: GeminiPromptConfig['projectContext']): string {
+  return `# Sistema de Análisis Inteligente - ${ctx.name}
 
-Eres un asistente especializado en análisis de código y automatización para el proyecto OpenTUI. Tu función es proporcionar respuestas estructuradas, precisas y consistentes que puedan ser parseadas automáticamente.
+Eres un asistente especializado en análisis de código y automatización para el proyecto ${ctx.name}. Tu función es proporcionar respuestas estructuradas, precisas y consistentes que puedan ser parseadas automáticamente.
 
 ## REGLAS CRÍTICAS DE FORMATO
 
@@ -57,14 +68,15 @@ Eres un asistente especializado en análisis de código y automatización para e
 5. **SECCIONES TÉCNICAS**: Siempre incluye las secciones <technical> y <changelog> cuando sea aplicable.
 
 ## Contexto del Proyecto
-**Nombre**: ${TPV_PROJECT_CONFIG.name}
-**Descripción**: ${TPV_PROJECT_CONFIG.description}
-**Versión Actual**: ${TPV_PROJECT_CONFIG.version}
-**Stack Tecnológico**: ${TPV_PROJECT_CONFIG.techStack.join(', ')}
-**Plataforma Objetivo**: ${TPV_PROJECT_CONFIG.targetPlatform}
+**Nombre**: ${ctx.name}
+**Descripción**: ${ctx.description}
+**Versión Actual**: ${ctx.version}
+**Stack Tecnológico**: ${ctx.techStack.join(', ')}
+**Plataforma Objetivo**: ${ctx.targetPlatform}
 
 ---
 `;
+}
 
 /**
  * Sufijo estándar con instrucciones de formato
@@ -87,12 +99,32 @@ const STANDARD_PROMPT_SUFFIX = `
  * Genera prompt para análisis de commits
  */
 export function createCommitPrompt(config: GeminiPromptConfig): string {
-  const { data, specificContext } = config;
-  
-  return `${STANDARD_PROMPT_PREFIX}
+  const { data, specificContext, projectContext, components, commitFormat } = config;
+  const prefix = createPromptPrefix(projectContext);
 
+  // Build components section if available
+  const componentsSection = components && components.length > 0
+    ? `\n## Componentes del Proyecto (Monorepo)\n${components.map(c => `- **${c.id}** → \`${c.path}\` — ${c.name}`).join('\n')}\n\nUsa el ID del componente como "área" en el prefijo del commit (ej: \`feat(web):\`, \`fix(agent-backend):\`).\n`
+    : '';
+
+  // Build commit format instructions
+  const titleLang = commitFormat?.titleLanguage || 'english';
+  const bodyLang = commitFormat?.bodyLanguage || 'spanish';
+  const includeTech = commitFormat?.includeTechnical !== false;
+  const includeChangelog = commitFormat?.includeChangelog !== false;
+
+  const formatInstructions = `
+## REGLAS DE IDIOMA Y FORMATO
+- **Título del commit**: en **${titleLang}**
+- **Descripción/body del commit**: en **${bodyLang}**
+- **Sección <technical>**: ${includeTech ? 'OBLIGATORIA — incluir siempre' : 'OMITIR'}
+- **Sección <changelog>**: ${includeChangelog ? 'OBLIGATORIA — incluir siempre' : 'OMITIR'}
+`;
+
+  return `${prefix}
+${componentsSection}
 # ANÁLISIS DE COMMITS
-
+${formatInstructions}
 ## Datos del Análisis
 ${JSON.stringify(data, null, 2)}
 
@@ -114,18 +146,18 @@ Tu respuesta debe seguir EXACTAMENTE esta estructura:
 ### **Propuesta de Commit #1**
 
 \`\`\`markdown
-[prefijo](área - descripción breve)
+[prefijo](área - descripción breve en ${titleLang})
 
-[Descripción completa en castellano de QUÉ se logró y POR QUÉ]
-
+[Descripción completa en ${bodyLang} de QUÉ se logró y POR QUÉ]
+${includeTech ? `
 <technical>
 [Detalles técnicos específicos: archivos modificados, funciones añadidas, refactorizaciones, etc.]
-</technical>
-
+</technical>` : ''}
+${includeChangelog ? `
 <changelog>
 ## [Tipo] [Emoji]
 [Entrada para changelog de la app, optimizada para mostrar al usuario]
-</changelog>
+</changelog>` : ''}
 \`\`\`
 
 ### **Propuesta de Commit #2** (solo si es necesario)
@@ -143,9 +175,10 @@ ${STANDARD_PROMPT_SUFFIX}`;
  * Genera prompt para asistente de workflow
  */
 export function createWorkflowPrompt(config: GeminiPromptConfig): string {
-  const { data, specificContext } = config;
-  
-  return `${STANDARD_PROMPT_PREFIX}
+  const { data, specificContext, projectContext } = config;
+  const prefix = createPromptPrefix(projectContext);
+
+  return `${prefix}
 
 # ASISTENTE DE WORKFLOW
 
@@ -194,9 +227,10 @@ ${STANDARD_PROMPT_SUFFIX}`;
  * Genera prompt para releases automáticas
  */
 export function createReleasePrompt(config: GeminiPromptConfig): string {
-  const { data, specificContext } = config;
-  
-  return `${STANDARD_PROMPT_PREFIX}
+  const { data, specificContext, projectContext } = config;
+  const prefix = createPromptPrefix(projectContext);
+
+  return `${prefix}
 
 # ANÁLISIS DE RELEASE
 
