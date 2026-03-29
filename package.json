@@ -1,14 +1,19 @@
 {
   "name": "gemini-commit-wizard",
-  "version": "1.1.3",
+  "version": "1.2.1",
   "description": "AI-powered Git commit generation with multi-provider support (Gemini, Groq, OpenRouter)",
   "main": "src/commit-generator.ts",
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cli": "./src/commit-ui.ts"
+  },
   "scripts": {
     "commit": "bun src/commit-ui.ts",
     "commit:quick": "bun src/commit-ui.ts --quick",
     "commit:manual": "bun src/commit-generator.ts",
     "commit:auto": "bun src/commit-generator.ts --auto-approve",
+    "commit:dry": "bun src/commit-generator.ts --dry-run",
     "version": "bun src/version-manager.ts",
     "version:minor": "bun src/version-manager.ts --type minor",
     "version:major": "bun src/version-manager.ts --type major",
@@ -49,9 +54,15 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@google/genai": "^1.40.0",
-    "groq-sdk": "^0.37.0",
-    "@openrouter/sdk": "^0.3.12"
+    "@anthropic-ai/claude-code": "^2.1.87",
+    "@google/genai": "^1.47.0",
+    "@inquirer/prompts": "^8.3.2",
+    "@mks2508/better-logger": "^5.0.0",
+    "@mks2508/no-throw": "^0.1.0",
+    "@openrouter/sdk": "^0.10.2",
+    "groq-sdk": "^1.1.2",
+    "octokit": "^5.0.5",
+    "simple-git": "^3.33.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
