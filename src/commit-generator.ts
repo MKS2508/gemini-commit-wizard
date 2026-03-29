@@ -1,798 +1,741 @@
 #!/usr/bin/env bun
 
 /**
- * Generador Automático de Commits con Gemini CLI
- * Analiza todos los cambios del repositorio y genera commits coherentes
- * siguiendo los patrones establecidos para el proyecto EL Haido TPV
+ * Core commit generation engine.
+ * Analyzes git changes and generates AI-powered commit proposals.
+ *
+ * SDK-first: accepts programmatic options. CLI entry point at bottom.
+ * @module commit-generator
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { createCommitPrompt, GeminiResponseParser, type GeminiPromptConfig } from './prompt-templates';
-import { createProvider, listProviders, type IAIProvider, type ProviderName } from './providers';
-import { loadProjectConfig, type IProjectConfig } from './project-config';
 import { join } from 'path';
+import { Logger } from '@mks2508/better-logger';
+import { ok, err, isErr, tryCatchAsync, type Result, type ResultError } from '@mks2508/no-throw';
+import { createCommitPrompt, GeminiResponseParser, type GeminiPromptConfig } from './prompt-templates';
+import { createProvider, listProviders } from './providers/index.js';
+import { loadProjectConfig } from './project-config';
+import { detectTerminalCapabilities, formatProviderBadge, shouldUseFancyOutput, type ITerminalCapabilities } from './utils/index.js';
+import type {
+    IAIProvider,
+    IProjectConfig,
+    IFileChange,
+    IGitStats,
+    ICommitAnalysis,
+    ICommitProposal,
+    ICommitGeneratorOptions,
+    ICommitResult,
+    CommitErrorCode,
+} from './types/index.js';
 
-interface FileChange {
-  path: string;
-  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked';
-  diff?: string;
-  lines_added?: number;
-  lines_removed?: number;
-  is_binary?: boolean;
-}
+const log = new Logger();
 
-interface GitStats {
-  total_files: number;
-  total_additions: number;
-  total_deletions: number;
-  files_by_extension: Record<string, number>;
-  directories_affected: string[];
-}
-
-interface CommitAnalysis {
-  files: FileChange[];
-  stats: GitStats;
-  project_context: {
-    name: string;
-    description: string;
-    tech_stack: string[];
-    target_platform: string;
-  };
-  commit_patterns: string;
-}
-
-interface CommitProposal {
-  title: string;
-  description: string;
-  technical: string;
-  changelog: string;
-  files?: string[];
-}
-
-class CommitGenerator {
-  private projectRoot: string;
-  private tempDir: string;
-  private autoApprove: boolean;
-  private noPush: boolean;
-  private provider: IAIProvider;
-  private projectConfig: IProjectConfig;
-
-  constructor(providerName?: string, modelOverride?: string) {
-    this.projectRoot = process.cwd();
-    this.tempDir = join(this.projectRoot, '.temp');
-    this.autoApprove = process.argv.includes('--auto-approve');
-    this.noPush = process.argv.includes('--no-push');
-
-    // Load project config (may specify default provider/model)
-    this.projectConfig = loadProjectConfig(this.projectRoot);
-
-    // Resolve provider: CLI arg > config file > auto-detect
-    const resolvedProvider = providerName || this.projectConfig.provider;
-    const resolvedModel = modelOverride || this.projectConfig.model;
-    this.provider = createProvider(resolvedProvider, resolvedModel);
-
-    console.log(`🤖 AI Provider: ${this.provider.name} (${this.provider.model})`);
-
-    this.ensureTempDir();
-  }
-
-  private ensureTempDir(): void {
-    if (!existsSync(this.tempDir)) {
-      Bun.spawnSync(['mkdir', '-p', this.tempDir]);
-    }
-  }
-
-  /**
-   * Ejecuta un comando git y devuelve el resultado
-   */
-  private async gitCommand(args: string[]): Promise<string> {
-    const result = Bun.spawnSync(['git', ...args], {
-      cwd: this.projectRoot,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-
-    if (result.exitCode !== 0) {
-      const error = result.stderr?.toString() || 'Git command failed';
-      throw new Error(`Git error: ${error}`);
-    }
-
-    return result.stdout?.toString().trim() || '';
-  }
-
-  /**
-   * Agrega todos los cambios al staging area
-   */
-  private async stageAllChanges(): Promise<void> {
-    console.log('📦 Agregando todos los cambios al staging area...');
-    await this.gitCommand(['add', '-A']);
-  }
-
-  /**
-   * Obtiene el estado actual del repositorio
-   */
-  private async getRepositoryStatus(): Promise<FileChange[]> {
-    console.log('🔍 Analizando estado del repositorio...');
-    
-    const statusOutput = await this.gitCommand(['status', '--porcelain']);
-    const files: FileChange[] = [];
-
-    for (const line of statusOutput.split('\n').filter(l => l.trim())) {
-      const status = line.substring(0, 2);
-      const filePath = line.substring(3);
-
-      let fileStatus: FileChange['status'];
-      if (status.includes('A')) fileStatus = 'added';
-      else if (status.includes('M')) fileStatus = 'modified';
-      else if (status.includes('D')) fileStatus = 'deleted';
-      else if (status.includes('R')) fileStatus = 'renamed';
-      else fileStatus = 'untracked';
-
-      files.push({
-        path: filePath,
-        status: fileStatus,
-      });
-    }
-
-    return files;
-  }
-
-  /**
-   * Obtiene el diff de un archivo específico
-   */
-  private async getFileDiff(filePath: string, isStaged: boolean = true): Promise<string> {
-    try {
-      const diffArgs = isStaged 
-        ? ['diff', '--cached', '--', filePath]
-        : ['diff', '--', filePath];
-      
-      return await this.gitCommand(diffArgs);
-    } catch (error) {
-      // Si es un archivo nuevo o binario, devolver información básica
-      try {
-        const showArgs = ['show', `HEAD:${filePath}`];
-        await this.gitCommand(showArgs);
-        return `New file: ${filePath}`;
-      } catch {
-        return `Binary or new file: ${filePath}`;
-      }
-    }
-  }
-
-  /**
-   * Obtiene estadísticas del repositorio
-   */
-  private async getGitStats(): Promise<GitStats> {
-    console.log('📊 Calculando estadísticas de cambios...');
-    
-    try {
-      const diffStat = await this.gitCommand(['diff', '--cached', '--stat']);
-      const lines = diffStat.split('\n').filter(l => l.trim());
-      
-      let totalFiles = 0;
-      let totalAdditions = 0;
-      let totalDeletions = 0;
-      const filesByExtension: Record<string, number> = {};
-      const directoriesAffected = new Set<string>();
-
-      for (const line of lines) {
-        if (line.includes('|')) {
-          totalFiles++;
-          const filePath = line.split('|')[0].trim();
-          
-          // Extraer extensión
-          const ext = filePath.split('.').pop() || 'no-ext';
-          filesByExtension[ext] = (filesByExtension[ext] || 0) + 1;
-          
-          // Extraer directorio
-          const dir = filePath.split('/')[0];
-          directoriesAffected.add(dir);
-          
-          // Extraer adiciones y eliminaciones
-          const stats = line.split('|')[1];
-          const plusCount = (stats.match(/\+/g) || []).length;
-          const minusCount = (stats.match(/\-/g) || []).length;
-          totalAdditions += plusCount;
-          totalDeletions += minusCount;
-        }
-      }
-
-      return {
-        total_files: totalFiles,
-        total_additions: totalAdditions,
-        total_deletions: totalDeletions,
-        files_by_extension: filesByExtension,
-        directories_affected: Array.from(directoriesAffected),
-      };
-    } catch (error) {
-      return {
-        total_files: 0,
-        total_additions: 0,
-        total_deletions: 0,
-        files_by_extension: {},
-        directories_affected: [],
-      };
-    }
-  }
-
-  /**
-   * Genera el contexto completo para Gemini CLI
-   */
-  private async generateAnalysisContext(): Promise<CommitAnalysis> {
-    console.log('🧠 Generando contexto de análisis...');
-
-    await this.stageAllChanges();
-    
-    const files = await this.getRepositoryStatus();
-    const stats = await this.getGitStats();
-
-    // Obtener diffs para cada archivo
-    for (const file of files) {
-      if (file.status !== 'deleted') {
-        try {
-          file.diff = await this.getFileDiff(file.path);
-          
-          // Calcular líneas agregadas/eliminadas del diff
-          if (file.diff) {
-            file.lines_added = (file.diff.match(/^\+[^+]/gm) || []).length;
-            file.lines_removed = (file.diff.match(/^-[^-]/gm) || []).length;
-            file.is_binary = file.diff.includes('Binary files differ');
-          }
-        } catch (error) {
-          file.diff = `Error getting diff: ${error}`;
-        }
-      }
-    }
-
-    // Cargar patrones de commit
-    const patternsPath = join(this.projectRoot, 'commit-templates/commit-patterns.md');
-    const commitPatterns = existsSync(patternsPath) 
-      ? readFileSync(patternsPath, 'utf-8')
-      : 'No commit patterns found';
+/**
+ * Parses CLI arguments into ICommitGeneratorOptions.
+ * @param argv - Raw process.argv (including first two entries)
+ * @returns Parsed options object
+ */
+function parseCliArgs(argv: string[]): ICommitGeneratorOptions {
+    const args = argv.slice(2);
+    const get = (flag: string): string | undefined => {
+        const idx = args.indexOf(flag);
+        return idx > -1 && args[idx + 1] ? args[idx + 1] : undefined;
+    };
 
     return {
-      files,
-      stats,
-      project_context: {
-        name: this.projectConfig.name,
-        description: this.projectConfig.description,
-        tech_stack: this.projectConfig.techStack,
-        target_platform: this.projectConfig.targetPlatform,
-      },
-      commit_patterns: commitPatterns,
+        provider: (get('--provider') || process.env.COMMIT_WIZARD_PROVIDER) as any,
+        model: get('--model'),
+        autoApprove: args.includes('--auto-approve'),
+        noPush: args.includes('--no-push'),
+        exhaustive: args.includes('--exhaustive') || args.includes('-exhaustive'),
+        context: get('--context'),
+        workType: get('--work-type'),
+        affectedComponents: get('--affected-components'),
+        dryRun: args.includes('--dry-run'),
+        json: args.includes('--json'),
+        verbose: args.includes('--verbose') || args.includes('-v'),
+        quiet: args.includes('--quiet') || args.includes('-q'),
+        silent: args.includes('--silent'),
+        listProviders: args.includes('--list-providers'),
+        quick: args.includes('--quick'),
     };
-  }
-
-  private createStandardPrompt(analysis: CommitAnalysis, extraContext: string = ''): string {
-    const config: GeminiPromptConfig = {
-      projectContext: {
-        name: this.projectConfig.name,
-        description: this.projectConfig.description,
-        version: this.projectConfig.version,
-        techStack: [...this.projectConfig.techStack],
-        targetPlatform: this.projectConfig.targetPlatform,
-      },
-      analysisType: 'commit',
-      specificContext: extraContext,
-      components: this.projectConfig.components,
-      commitFormat: this.projectConfig.commitFormat,
-      data: {
-        stats: analysis.stats,
-        files: analysis.files.map(file => ({
-          path: file.path,
-          status: file.status,
-          lines_added: file.lines_added,
-          lines_removed: file.lines_removed,
-          is_binary: file.is_binary,
-          diff_preview: file.diff?.substring(0, 1500) || 'No diff available'
-        })),
-        patterns: analysis.commit_patterns
-      }
-    };
-
-    return createCommitPrompt(config);
-  }
-
-  private createExhaustivePrompt(analysis: CommitAnalysis, extraContext: string = ''): string {
-    const config: GeminiPromptConfig = {
-      projectContext: {
-        name: this.projectConfig.name,
-        description: this.projectConfig.description,
-        version: this.projectConfig.version,
-        techStack: [...this.projectConfig.techStack],
-        targetPlatform: this.projectConfig.targetPlatform,
-      },
-      analysisType: 'commit',
-      specificContext: `MODO EXHAUSTIVO: Análisis profundo requerido.\n${extraContext}`,
-      components: this.projectConfig.components,
-      commitFormat: this.projectConfig.commitFormat,
-      data: {
-        mode: 'exhaustive',
-        stats: analysis.stats,
-        files: analysis.files.map(file => ({
-          path: file.path,
-          status: file.status,
-          lines_added: file.lines_added,
-          lines_removed: file.lines_removed,
-          is_binary: file.is_binary,
-          diff_preview: file.diff?.substring(0, 2000) || 'No diff available'
-        })),
-        patterns: analysis.commit_patterns
-      }
-    };
-
-    return createCommitPrompt(config);
-  }
-
-  /**
-   * Construye contexto mejorado con parámetros adicionales
-   */
-  private buildEnhancedContext(
-    extraContext: string,
-    contextDescription: string,
-    workType: string,
-    affectedComponents: string,
-    performanceImpact: string,
-    breakingChanges: string
-  ): string {
-    let enhancedContext = extraContext;
-
-    const contextParts = [];
-
-    if (contextDescription) {
-      contextParts.push(`**Descripción del trabajo**: ${contextDescription}`);
-    }
-
-    if (workType) {
-      const workTypeDescriptions = {
-        'feature': 'Nueva funcionalidad o capacidad',
-        'bugfix': 'Corrección de error o fallo',
-        'refactor': 'Mejora del código sin cambios de funcionalidad',
-        'docs': 'Actualización de documentación',
-        'performance': 'Optimización de rendimiento',
-        'ui': 'Cambios en interfaz de usuario',
-        'api': 'Modificaciones en API o endpoints',
-        'security': 'Mejoras de seguridad',
-        'test': 'Adición o modificación de tests'
-      };
-      contextParts.push(`**Tipo de trabajo**: ${workType} - ${workTypeDescriptions[workType] || workType}`);
-    }
-
-    if (affectedComponents) {
-      contextParts.push(`**Componentes afectados**: ${affectedComponents}`);
-    }
-
-    if (performanceImpact) {
-      const performanceDescriptions = {
-        'mejora': 'Este cambio mejora el rendimiento del sistema',
-        'neutro': 'Este cambio no afecta significativamente el rendimiento',
-        'regresion': 'Este cambio puede impactar negativamente el rendimiento (justificado por otros beneficios)'
-      };
-      contextParts.push(`**Impacto en rendimiento**: ${performanceImpact} - ${performanceDescriptions[performanceImpact] || performanceImpact}`);
-    }
-
-    if (breakingChanges) {
-      const breakingDescription = breakingChanges.toLowerCase() === 'si' 
-        ? 'Este cambio introduce cambios que rompen compatibilidad hacia atrás'
-        : 'Este cambio mantiene compatibilidad hacia atrás';
-      contextParts.push(`**Cambios incompatibles**: ${breakingChanges} - ${breakingDescription}`);
-    }
-
-    if (contextParts.length > 0) {
-      const contextSection = contextParts.join('\n');
-      enhancedContext = enhancedContext 
-        ? `${enhancedContext}\n\n## Contexto Estructurado\n\n${contextSection}`
-        : `## Contexto Estructurado\n\n${contextSection}`;
-    }
-
-    return enhancedContext;
-  }
-
-  /**
-   * Invoca el AI provider con el contexto de análisis
-   */
-  private async analyzeWithAI(analysis: CommitAnalysis, exhaustive: boolean = false, extraContext: string = ''): Promise<string> {
-    console.log(`🤖 Analizando cambios con ${this.provider.name}... ${exhaustive ? '(Modo Exhaustivo)' : ''}`);
-
-    const prompt = exhaustive
-      ? this.createExhaustivePrompt(analysis, extraContext)
-      : this.createStandardPrompt(analysis, extraContext);
-
-    // Guardar el contexto en un archivo temporal
-    const contextPath = join(this.tempDir, 'analysis-context.json');
-    writeFileSync(contextPath, JSON.stringify(analysis, null, 2));
-
-    // Guardar el prompt en un archivo temporal
-    const promptPath = join(this.tempDir, 'prompt.txt');
-    writeFileSync(promptPath, prompt);
-
-    try {
-      const response = await this.provider.generate(prompt);
-
-      // Guardar la respuesta
-      const responsePath = join(this.tempDir, 'response.md');
-      writeFileSync(responsePath, response);
-
-      return response;
-    } catch (error) {
-      console.error(`❌ Error with ${this.provider.name}:`, error);
-      console.log('📝 Contexto guardado en:', contextPath);
-      console.log('📝 Prompt guardado en:', promptPath);
-      throw error;
-    }
-  }
-
-  /**
-   * Guarda la propuesta de commits
-   */
-  private saveCommitProposal(analysis: string): string {
-    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
-    const proposalPath = join(this.tempDir, `commit-proposal-${timestamp}.md`);
-    
-    writeFileSync(proposalPath, analysis);
-    return proposalPath;
-  }
-
-  /**
-   * Parsea propuestas de commit de la respuesta de Gemini
-   */
-  private parseCommitProposals(aiResponse: string): CommitProposal[] {
-    // Usar el parser estandarizado
-    const parsedProposals = GeminiResponseParser.parseCommitProposals(aiResponse);
-    
-    // Convertir al formato interno
-    return parsedProposals.map(proposal => ({
-      title: proposal.title,
-      description: proposal.description,
-      technical: proposal.technical,
-      changelog: proposal.changelog,
-      files: [] // Usar todos los archivos disponibles
-    }));
-  }
-
-  /**
-   * Ejecuta un commit individual
-   */
-  private async executeCommit(proposal: CommitProposal, allFiles: FileChange[]): Promise<boolean> {
-    console.log(`\n🔨 Ejecutando commit: ${proposal.title}`);
-    
-    try {
-      // Si no hay archivos específicos, usar todos los archivos disponibles (excluyendo temp files)
-      const targetFiles = proposal.files && proposal.files.length > 0 
-        ? proposal.files 
-        : allFiles
-            .map(f => f.path)
-            .filter(path => !path.includes('.temp/') && !path.startsWith('.release-notes-'));
-      
-      // Agregar archivos específicos al staging area
-      for (const file of targetFiles) {
-        try {
-          await this.gitCommand(['add', file]);
-          console.log(`  ✓ Agregado: ${file}`);
-        } catch (error) {
-          console.warn(`  ⚠️ No se pudo agregar ${file}:`, error);
-        }
-      }
-      
-      // Verificar que hay algo para commitear
-      try {
-        const statusResult = await this.gitCommand(['diff', '--cached', '--name-only']);
-        if (!statusResult.trim()) {
-          console.warn(`  ⚠️ No hay cambios staged para este commit`);
-          return false;
-        }
-      } catch (error) {
-        // Fallback si diff --cached no funciona
-        console.log(`  🔍 Verificando staging area...`);
-      }
-      
-      // Crear mensaje de commit
-      let commitMessage = proposal.title;
-      if (proposal.description) {
-        commitMessage += `\n\n${proposal.description}`;
-      }
-      if (proposal.technical) {
-        commitMessage += `\n\n<technical>\n${proposal.technical}\n</technical>`;
-      }
-      if (proposal.changelog) {
-        commitMessage += `\n\n<changelog>\n${proposal.changelog}\n</changelog>`;
-      }
-      
-      // Ejecutar commit
-      await this.gitCommand(['commit', '-m', commitMessage]);
-      console.log(`  ✅ Commit exitoso`);
-      return true;
-      
-    } catch (error) {
-      console.error(`  ❌ Error en commit:`, error);
-      return false;
-    }
-  }
-
-  /**
-   * Ejecuta push de todos los commits
-   */
-  private async pushCommits(): Promise<void> {
-    if (this.noPush) {
-      console.log('⏭️ Push deshabilitado por --no-push');
-      return;
-    }
-    
-    console.log('\n📤 Pushing commits to remote...');
-    
-    try {
-      await this.gitCommand(['push', 'origin', 'master']);
-      console.log('✅ Push completado exitosamente');
-    } catch (error) {
-      console.error('❌ Error en push:', error);
-      console.log('💡 Los commits están en tu repositorio local');
-    }
-  }
-
-  /**
-   * Valida que auto-approve es seguro de ejecutar
-   */
-  private async validateAutoApprove(): Promise<boolean> {
-    try {
-      // Verificar que estamos en la rama correcta
-      const currentBranch = await this.gitCommand(['branch', '--show-current']);
-      if (currentBranch !== 'master') {
-        console.warn(`⚠️ No estás en la rama master (actual: ${currentBranch})`);
-        return false;
-      }
-      
-      // Verificar que el repositorio está limpio (sin conflictos)
-      const statusOutput = await this.gitCommand(['status', '--porcelain']);
-      const conflicts = statusOutput.split('\n').filter(line => line.startsWith('UU'));
-      if (conflicts.length > 0) {
-        console.error('❌ Hay conflictos de merge sin resolver');
-        return false;
-      }
-      
-      return true;
-    } catch (error) {
-      console.error('❌ Error validando repositorio:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Ejecuta el generador completo
-   */
-  async generate(): Promise<void> {
-    console.log(`🚀 Iniciando generador de commits...${this.autoApprove ? ' (AUTO-APPROVE MODE)' : ''}\n`);
-
-    const args = process.argv.slice(2);
-    const isExhaustive = args.includes('-exhaustive');
-
-    // Parsear parámetros de contexto mejorados
-    let extraContext = '';
-    let workType = '';
-    let contextDescription = '';
-    let affectedComponents = '';
-    let performanceImpact = '';
-    let breakingChanges = '';
-
-    const extraIndex = args.indexOf('--extra');
-    if (extraIndex > -1 && args[extraIndex + 1]) {
-        extraContext = args[extraIndex + 1];
-        console.log(`💬 Contexto extra proporcionado por el usuario.`);
-    } else if (extraIndex > -1) {
-        console.warn('⚠️ El parámetro --extra requiere un valor de texto después.');
-    }
-
-    const contextIndex = args.indexOf('--context');
-    if (contextIndex > -1 && args[contextIndex + 1]) {
-        contextDescription = args[contextIndex + 1];
-        console.log(`📋 Contexto del trabajo: ${contextDescription}`);
-    }
-
-    const workTypeIndex = args.indexOf('--work-type');
-    if (workTypeIndex > -1 && args[workTypeIndex + 1]) {
-        workType = args[workTypeIndex + 1];
-        console.log(`🏷️ Tipo de trabajo: ${workType}`);
-    }
-
-    const componentsIndex = args.indexOf('--affected-components');
-    if (componentsIndex > -1 && args[componentsIndex + 1]) {
-        affectedComponents = args[componentsIndex + 1];
-        console.log(`🎯 Componentes afectados: ${affectedComponents}`);
-    }
-
-    const perfIndex = args.indexOf('--performance-impact');
-    if (perfIndex > -1 && args[perfIndex + 1]) {
-        performanceImpact = args[perfIndex + 1];
-        console.log(`⚡ Impacto en rendimiento: ${performanceImpact}`);
-    }
-
-    const breakingIndex = args.indexOf('--breaking-changes');
-    if (breakingIndex > -1 && args[breakingIndex + 1]) {
-        breakingChanges = args[breakingIndex + 1];
-        console.log(`⚠️ Cambios que rompen compatibilidad: ${breakingChanges}`);
-    }
-
-    try {
-      // Verificar que estamos en un repositorio git
-      await this.gitCommand(['status']);
-
-      // Generar análisis completo
-      const analysis = await this.generateAnalysisContext();
-      
-      if (analysis.files.length === 0) {
-        console.log('✅ No hay cambios para procesar');
-        return;
-      }
-
-      const fileCount = analysis.files.length;
-      const exhaustiveMode = isExhaustive || fileCount > 50;
-
-      console.log(`📋 Encontrados ${fileCount} archivos modificados`);
-      console.log(`📊 Estadísticas: +${analysis.stats.total_additions} -${analysis.stats.total_deletions} líneas`);
-      if (exhaustiveMode) {
-        console.log('⚡️ Activado modo de análisis exhaustivo.');
-      }
-
-      // Preparar contexto completo mejorado
-      const enhancedContext = this.buildEnhancedContext(
-        extraContext,
-        contextDescription,
-        workType,
-        affectedComponents,
-        performanceImpact,
-        breakingChanges
-      );
-
-      // Analizar con AI provider
-      const commitProposal = await this.analyzeWithAI(analysis, exhaustiveMode, enhancedContext);
-      
-      // Guardar propuesta
-      const proposalPath = this.saveCommitProposal(commitProposal);
-      
-      if (this.autoApprove) {
-        // Validar que es seguro ejecutar auto-approve
-        const isValid = await this.validateAutoApprove();
-        if (!isValid) {
-          console.error('❌ Auto-approve cancelado por validaciones de seguridad');
-          return;
-        }
-        
-        // Parsear y ejecutar commits
-        console.log('\n🤖 Ejecutando commits automáticamente...');
-        const proposals = this.parseCommitProposals(commitProposal);
-        
-        if (proposals.length === 0) {
-          console.warn('⚠️ No se encontraron commits válidos para ejecutar');
-          console.log('📋 Revisa la propuesta manualmente:');
-          console.log(commitProposal);
-          return;
-        }
-        
-        console.log(`📦 Encontrados ${proposals.length} commits para ejecutar:`);
-        proposals.forEach((p, i) => {
-          console.log(`  ${i + 1}. ${p.title}`);
-        });
-        
-        let successfulCommits = 0;
-        
-        // Ejecutar cada commit secuencialmente
-        for (let i = 0; i < proposals.length; i++) {
-          const proposal = proposals[i];
-          const success = await this.executeCommit(proposal, analysis.files);
-          if (success) {
-            successfulCommits++;
-          } else {
-            console.error(`❌ Falló commit ${i + 1}: ${proposal.title}`);
-            // Continuar con los siguientes commits
-          }
-        }
-        
-        console.log(`\n📊 Resultados: ${successfulCommits}/${proposals.length} commits exitosos`);
-        
-        if (successfulCommits > 0) {
-          await this.pushCommits();
-        }
-        
-        console.log('\n✅ Auto-approve completado');
-        
-      } else {
-        // Modo normal - solo mostrar propuesta
-        console.log('\n✅ Análisis completado');
-        console.log(`📄 Propuesta guardada en: ${proposalPath}`);
-        console.log('\n📋 Propuesta de commits:');
-        console.log('─'.repeat(60));
-        console.log(commitProposal);
-        console.log('─'.repeat(60));
-        console.log('\n💡 Usa --auto-approve para ejecutar automáticamente los commits');
-      }
-
-    } catch (error) {
-      console.error('❌ Error en el generador:', error);
-      process.exit(1);
-    }
-  }
 }
 
-// Ejecutar el generador si se llama directamente
-if (import.meta.main) {
-  const args = process.argv.slice(2);
+/**
+ * Generates AI-powered commit messages by analyzing git changes.
+ *
+ * @example
+ * ```typescript
+ * const generator = new CommitGenerator({ provider: 'groq', autoApprove: true });
+ * const result = await generator.generate();
+ * if (isOk(result)) {
+ *   console.log(`Applied ${result.value.commitCount} commits`);
+ * }
+ * ```
+ */
+export class CommitGenerator {
+    private projectRoot: string;
+    private tempDir: string;
+    private options: ICommitGeneratorOptions;
+    private provider: IAIProvider;
+    private projectConfig: IProjectConfig;
+    private caps: ITerminalCapabilities;
 
-  if (args.includes('--help') || args.includes('-h')) {
-    console.log(`
-🚀 Generador Automático de Commits con AI
+    /**
+     * @param options - Programmatic configuration options
+     */
+    constructor(options: ICommitGeneratorOptions = {}) {
+        this.options = options;
+        this.projectRoot = options.projectRoot || process.cwd();
+        this.tempDir = join(this.projectRoot, '.temp');
+        this.caps = detectTerminalCapabilities();
 
-Analiza cambios del repositorio y genera commits coherentes siguiendo los patrones del proyecto.
-Soporta múltiples providers de AI: Gemini CLI, Gemini SDK, Groq, OpenRouter.
+        // Configure logger level based on options (v5 setCLILevel)
+        if (options.silent) {
+            log.setCLILevel('silent');
+        } else if (options.quiet) {
+            log.setCLILevel('quiet');
+        } else if (options.verbose) {
+            log.setCLILevel('debug');
+        }
 
-Uso:
-  bun src/commit-generator.ts [opciones]
+        this.projectConfig = loadProjectConfig(this.projectRoot);
 
-Opciones:
-  --provider <name>            Provider: gemini-cli|gemini-sdk|groq|openrouter (auto-detect if omitted)
-  --model <model-id>           Model override (e.g. "llama-3.3-70b-versatile", "anthropic/claude-sonnet-4")
-  --auto-approve               Ejecutar automáticamente los commits propuestos y hacer push
-  --no-push                    Con --auto-approve, no hacer push (solo commits locales)
-  --extra <texto>              Contexto adicional para mejorar el análisis
-  --context <descripción>      Descripción del trabajo actual
-  --work-type <tipo>           Tipo: feature|bugfix|refactor|docs|performance|ui|api|security|test
-  --affected-components <lista> Componentes afectados (ej: "productos,carrito,checkout")
-  --performance-impact <tipo>  Impacto: mejora|neutro|regresion
-  --breaking-changes <si|no>   Si introduce cambios incompatibles
-  --exhaustive                 Análisis exhaustivo para proyectos complejos (automático si >50 archivos)
-  --list-providers             List all available AI providers and exit
-  --help, -h                   Mostrar esta ayuda
+        const resolvedProvider = options.provider || this.projectConfig.provider;
+        const resolvedModel = options.model || this.projectConfig.model;
+        this.provider = createProvider(resolvedProvider, resolvedModel);
 
-Provider auto-detection (when --provider is omitted):
-  1. GEMINI_API_KEY set  → Gemini SDK
-  2. GROQ_API_KEY set    → Groq (fastest)
-  3. OPENROUTER_API_KEY  → OpenRouter (300+ models)
-  4. gemini binary found → Gemini CLI
-
-Configuration:
-  Config loaded from .commit-wizard.json or package.json "commitWizard" key.
-  Set default provider/model in config to avoid --provider flag every time.
-
-Ejemplos:
-  bun run commit --auto-approve                                    # Auto-detect provider
-  bun run commit --provider groq --auto-approve                    # Use Groq
-  bun run commit --provider openrouter --model anthropic/claude-sonnet-4  # Use Claude via OpenRouter
-  bun run commit --context "auth system" --work-type feature       # With context
-`);
-    process.exit(0);
-  }
-
-  // Handle --list-providers
-  if (args.includes('--list-providers')) {
-    console.log('\n📋 Available AI Providers:\n');
-    for (const p of listProviders()) {
-      const status = p.available ? '✅' : '❌';
-      console.log(`  ${status} ${p.name} (${p.id})`);
-      if (!p.available) {
-        console.log(`     → ${p.requirement}`);
-      }
+        // Subtle provider badge instead of loud message
+        if (!options.quiet && !options.silent) {
+            const providerBadge = formatProviderBadge(this.provider.name, this.caps);
+            log.info(`${providerBadge} ${this.provider.model}`);
+        }
+        this.ensureTempDir();
     }
-    console.log('');
-    process.exit(0);
-  }
 
-  // Parse --provider and --model args
-  let providerArg: string | undefined;
-  let modelArg: string | undefined;
+    /**
+     * Get the AI provider being used.
+     * @returns Current IAIProvider instance
+     */
+    getProvider(): IAIProvider {
+        return this.provider;
+    }
 
-  const providerIndex = args.indexOf('--provider');
-  if (providerIndex > -1 && args[providerIndex + 1]) {
-    providerArg = args[providerIndex + 1];
-  }
+    /**
+     * Get the loaded project configuration.
+     * @returns Current IProjectConfig
+     */
+    getConfig(): IProjectConfig {
+        return this.projectConfig;
+    }
 
-  const modelIndex = args.indexOf('--model');
-  if (modelIndex > -1 && args[modelIndex + 1]) {
-    modelArg = args[modelIndex + 1];
-  }
+    private ensureTempDir(): void {
+        if (!existsSync(this.tempDir)) {
+            Bun.spawnSync(['mkdir', '-p', this.tempDir]);
+        }
+    }
 
-  // Also check COMMIT_WIZARD_PROVIDER env var
-  if (!providerArg && process.env.COMMIT_WIZARD_PROVIDER) {
-    providerArg = process.env.COMMIT_WIZARD_PROVIDER;
-  }
+    /**
+     * Run a git command and return stdout.
+     * @param args - Git subcommand and arguments
+     * @returns Result with stdout text or GIT_ERROR
+     */
+    private async gitCommand(args: string[]): Promise<Result<string, ResultError<'GIT_ERROR'>>> {
+        return tryCatchAsync(async () => {
+            const result = Bun.spawnSync(['git', ...args], {
+                cwd: this.projectRoot,
+                stdout: 'pipe',
+                stderr: 'pipe',
+            });
+            if (result.exitCode !== 0) {
+                const stderr = result.stderr?.toString() || 'Git command failed';
+                throw new Error(`Git error: ${stderr}`);
+            }
+            return result.stdout?.toString().trim() || '';
+        }, 'GIT_ERROR');
+    }
 
-  const generator = new CommitGenerator(providerArg, modelArg);
-  await generator.generate();
+    /**
+     * Stage all changes.
+     * @returns Result indicating success or STAGING_ERROR
+     */
+    private async stageAllChanges(): Promise<Result<void, ResultError<'STAGING_ERROR'>>> {
+        const result = await this.gitCommand(['add', '-A']);
+        if (isErr(result)) return err({ type: 'STAGING_ERROR', message: result.error.message } as any);
+        return ok(undefined);
+    }
+
+    /**
+     * Get the current repository status as a list of file changes.
+     * @returns Result with file changes or GIT_ERROR
+     */
+    private async getRepositoryStatus(): Promise<Result<IFileChange[], ResultError<'GIT_ERROR'>>> {
+        const result = await this.gitCommand(['status', '--porcelain']);
+        if (isErr(result)) return result as any;
+
+        const files: IFileChange[] = [];
+        for (const line of result.value.split('\n').filter(l => l.trim())) {
+            const status = line.substring(0, 2);
+            const filePath = line.substring(3);
+
+            let fileStatus: IFileChange['status'];
+            if (status.includes('A')) fileStatus = 'added';
+            else if (status.includes('M')) fileStatus = 'modified';
+            else if (status.includes('D')) fileStatus = 'deleted';
+            else if (status.includes('R')) fileStatus = 'renamed';
+            else fileStatus = 'untracked';
+
+            files.push({ path: filePath, status: fileStatus });
+        }
+
+        return ok(files);
+    }
+
+    /**
+     * Get the diff for a specific file.
+     * @param filePath - File to diff
+     * @param isStaged - Whether to diff staged changes
+     * @returns Diff text (never fails — returns fallback text on error)
+     */
+    private async getFileDiff(filePath: string, isStaged: boolean = true): Promise<string> {
+        const diffArgs = isStaged
+            ? ['diff', '--cached', '--', filePath]
+            : ['diff', '--', filePath];
+
+        const result = await this.gitCommand(diffArgs);
+        if (isErr(result)) return `Binary or new file: ${filePath}`;
+        return result.value;
+    }
+
+    /**
+     * Calculate aggregate diff statistics.
+     * @returns Git stats (returns empty stats on error)
+     */
+    private async getGitStats(): Promise<IGitStats> {
+        const result = await this.gitCommand(['diff', '--cached', '--stat']);
+        if (isErr(result)) {
+            return { total_files: 0, total_additions: 0, total_deletions: 0, files_by_extension: {}, directories_affected: [] };
+        }
+
+        const lines = result.value.split('\n').filter(l => l.trim());
+        let totalFiles = 0;
+        let totalAdditions = 0;
+        let totalDeletions = 0;
+        const filesByExtension: Record<string, number> = {};
+        const directoriesAffected = new Set<string>();
+
+        for (const line of lines) {
+            if (line.includes('|')) {
+                totalFiles++;
+                const filePath = line.split('|')[0].trim();
+                const ext = filePath.split('.').pop() || 'no-ext';
+                filesByExtension[ext] = (filesByExtension[ext] || 0) + 1;
+                const dir = filePath.split('/')[0];
+                directoriesAffected.add(dir);
+                const stats = line.split('|')[1];
+                totalAdditions += (stats.match(/\+/g) || []).length;
+                totalDeletions += (stats.match(/\-/g) || []).length;
+            }
+        }
+
+        return { total_files: totalFiles, total_additions: totalAdditions, total_deletions: totalDeletions, files_by_extension: filesByExtension, directories_affected: Array.from(directoriesAffected) };
+    }
+
+    /**
+     * Build the full analysis context for the AI prompt.
+     * @returns Result with commit analysis or error
+     */
+    private async generateAnalysisContext(): Promise<Result<ICommitAnalysis, ResultError<CommitErrorCode>>> {
+        const stageResult = await this.stageAllChanges();
+        if (isErr(stageResult)) return stageResult as any;
+
+        const filesResult = await this.getRepositoryStatus();
+        if (isErr(filesResult)) return filesResult as any;
+        const files = filesResult.value;
+
+        const stats = await this.getGitStats();
+
+        for (const file of files) {
+            if (file.status !== 'deleted') {
+                file.diff = await this.getFileDiff(file.path);
+                if (file.diff) {
+                    file.lines_added = (file.diff.match(/^\+[^+]/gm) || []).length;
+                    file.lines_removed = (file.diff.match(/^-[^-]/gm) || []).length;
+                    file.is_binary = file.diff.includes('Binary files differ');
+                }
+            }
+        }
+
+        const patternsPath = join(this.projectRoot, 'commit-templates/commit-patterns.md');
+        const commitPatterns = existsSync(patternsPath)
+            ? readFileSync(patternsPath, 'utf-8')
+            : 'No commit patterns found';
+
+        return ok({
+            files,
+            stats,
+            project_context: {
+                name: this.projectConfig.name,
+                description: this.projectConfig.description,
+                tech_stack: this.projectConfig.techStack,
+                target_platform: this.projectConfig.targetPlatform,
+            },
+            commit_patterns: commitPatterns,
+        });
+    }
+
+    private createPrompt(analysis: ICommitAnalysis, exhaustive: boolean, extraContext: string): string {
+        const config: GeminiPromptConfig = {
+            projectContext: {
+                name: this.projectConfig.name,
+                description: this.projectConfig.description,
+                version: this.projectConfig.version,
+                techStack: [...this.projectConfig.techStack],
+                targetPlatform: this.projectConfig.targetPlatform,
+            },
+            analysisType: 'commit',
+            specificContext: exhaustive ? `MODO EXHAUSTIVO: Análisis profundo requerido.\n${extraContext}` : extraContext,
+            components: this.projectConfig.components,
+            commitFormat: this.projectConfig.commitFormat,
+            data: {
+                ...(exhaustive && { mode: 'exhaustive' }),
+                stats: analysis.stats,
+                files: analysis.files.map(file => ({
+                    path: file.path,
+                    status: file.status,
+                    lines_added: file.lines_added,
+                    lines_removed: file.lines_removed,
+                    is_binary: file.is_binary,
+                    diff_preview: file.diff?.substring(0, exhaustive ? 2000 : 1500) || 'No diff available',
+                })),
+                patterns: analysis.commit_patterns,
+            },
+        };
+        return createCommitPrompt(config);
+    }
+
+    /**
+     * Build enhanced context from structured user input.
+     * @returns Combined context string
+     */
+    private buildEnhancedContext(): string {
+        const parts: string[] = [];
+        const o = this.options;
+
+        if (o.context) parts.push(`**Descripcion del trabajo**: ${o.context}`);
+
+        if (o.workType) {
+            const desc: Record<string, string> = {
+                feature: 'Nueva funcionalidad o capacidad',
+                bugfix: 'Correccion de error o fallo',
+                refactor: 'Mejora del codigo sin cambios de funcionalidad',
+                docs: 'Actualizacion de documentacion',
+                performance: 'Optimizacion de rendimiento',
+                ui: 'Cambios en interfaz de usuario',
+                api: 'Modificaciones en API o endpoints',
+                security: 'Mejoras de seguridad',
+                test: 'Adicion o modificacion de tests',
+            };
+            parts.push(`**Tipo de trabajo**: ${o.workType} - ${desc[o.workType] || o.workType}`);
+        }
+
+        if (o.affectedComponents) parts.push(`**Componentes afectados**: ${o.affectedComponents}`);
+
+        if (parts.length === 0) return '';
+        return `## Contexto Estructurado\n\n${parts.join('\n')}`;
+    }
+
+    /**
+     * Invoke the AI provider with the analysis context.
+     * @param analysis - Commit analysis data
+     * @param exhaustive - Whether to use exhaustive analysis
+     * @param extraContext - Additional context string
+     * @returns Result with the AI response text or PROVIDER_ERROR
+     */
+    private async analyzeWithAI(
+        analysis: ICommitAnalysis,
+        exhaustive: boolean,
+        extraContext: string,
+    ): Promise<Result<string, ResultError<'PROVIDER_ERROR'>>> {
+        const prompt = this.createPrompt(analysis, exhaustive, extraContext);
+
+        const contextPath = join(this.tempDir, 'analysis-context.json');
+        writeFileSync(contextPath, JSON.stringify(analysis, null, 2));
+        const promptPath = join(this.tempDir, 'prompt.txt');
+        writeFileSync(promptPath, prompt);
+
+        const result = await tryCatchAsync(async () => {
+            const response = await this.provider.generate(prompt);
+            const responsePath = join(this.tempDir, 'response.md');
+            writeFileSync(responsePath, response);
+            return response;
+        }, 'PROVIDER_ERROR');
+
+        if (isErr(result)) {
+            log.error(`Error with ${this.provider.name}: ${result.error.message}`);
+            log.info(`Context saved: ${contextPath}`);
+            log.info(`Prompt saved: ${promptPath}`);
+        }
+
+        return result;
+    }
+
+    /**
+     * Parse AI response into commit proposals.
+     * @param aiResponse - Raw AI response text
+     * @returns Array of parsed commit proposals
+     */
+    private parseCommitProposals(aiResponse: string): ICommitProposal[] {
+        const parsed = GeminiResponseParser.parseCommitProposals(aiResponse);
+        return parsed.map(p => ({
+            title: p.title,
+            description: p.description,
+            technical: p.technical,
+            changelog: p.changelog,
+            files: [],
+        }));
+    }
+
+    /**
+     * Execute a single commit.
+     * @param proposal - The commit proposal to execute
+     * @param allFiles - All changed files (used when proposal has no specific files)
+     * @returns Result indicating success or COMMIT_EXEC_ERROR
+     */
+    private async executeCommit(
+        proposal: ICommitProposal,
+        allFiles: IFileChange[],
+    ): Promise<Result<boolean, ResultError<'COMMIT_EXEC_ERROR'>>> {
+        return tryCatchAsync(async () => {
+            const targetFiles = proposal.files && proposal.files.length > 0
+                ? proposal.files
+                : allFiles
+                    .map(f => f.path)
+                    .filter(p => !p.includes('.temp/') && !p.startsWith('.release-notes-'));
+
+            for (const file of targetFiles) {
+                const addResult = await this.gitCommand(['add', file]);
+                if (isErr(addResult)) {
+                    log.warn(`Could not stage ${file}: ${addResult.error.message}`);
+                }
+            }
+
+            const statusResult = await this.gitCommand(['diff', '--cached', '--name-only']);
+            if (isErr(statusResult) || !statusResult.value.trim()) {
+                log.warn('No staged changes for this commit');
+                return false;
+            }
+
+            let commitMessage = proposal.title;
+            if (proposal.description) commitMessage += `\n\n${proposal.description}`;
+            if (proposal.technical) commitMessage += `\n\n<technical>\n${proposal.technical}\n</technical>`;
+            if (proposal.changelog) commitMessage += `\n\n<changelog>\n${proposal.changelog}\n</changelog>`;
+
+            const commitResult = await this.gitCommand(['commit', '-m', commitMessage]);
+            if (isErr(commitResult)) throw new Error(commitResult.error.message);
+            return true;
+        }, 'COMMIT_EXEC_ERROR');
+    }
+
+    /**
+     * Push commits to remote.
+     * @returns Result indicating success or GIT_ERROR
+     */
+    private async pushCommits(): Promise<Result<boolean, ResultError<'GIT_ERROR'>>> {
+        if (this.options.noPush) {
+            return ok(false);
+        }
+
+        const sp = log.spinner('Pushing...');
+        sp.start();
+        const result = await this.gitCommand(['push', 'origin', 'master']);
+        if (isErr(result)) {
+            sp.fail('Push failed');
+            log.warn('Commits are in your local repository');
+            return result;
+        }
+        sp.succeed('Pushed');
+        return ok(true);
+    }
+
+    /**
+     * Validate that auto-approve is safe to execute.
+     * @returns Whether it's safe to proceed
+     */
+    private async validateAutoApprove(): Promise<boolean> {
+        const branchResult = await this.gitCommand(['branch', '--show-current']);
+        if (isErr(branchResult)) return false;
+        if (branchResult.value !== 'master') {
+            log.warn(`Not on master branch (current: ${branchResult.value})`);
+            return false;
+        }
+
+        const statusResult = await this.gitCommand(['status', '--porcelain']);
+        if (isErr(statusResult)) return false;
+        const conflicts = statusResult.value.split('\n').filter(l => l.startsWith('UU'));
+        if (conflicts.length > 0) {
+            log.error('Unresolved merge conflicts');
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Analyze changes and return proposals without executing commits.
+     * @returns Result with an array of commit proposals or an error
+     */
+    async analyze(): Promise<Result<ICommitProposal[], ResultError<CommitErrorCode>>> {
+        const analysisResult = await this.generateAnalysisContext();
+        if (isErr(analysisResult)) return analysisResult as any;
+        const analysis = analysisResult.value;
+
+        if (analysis.files.length === 0) return ok([]);
+
+        const exhaustive = this.options.exhaustive || analysis.files.length > 50;
+        const extraContext = this.buildEnhancedContext();
+
+        const aiResult = await this.analyzeWithAI(analysis, exhaustive, extraContext);
+        if (isErr(aiResult)) return aiResult as any;
+
+        return ok(this.parseCommitProposals(aiResult.value));
+    }
+
+    /**
+     * Full commit generation flow: analyze, propose, execute, push.
+     * @returns Result with commit outcome or an error
+     */
+    async generate(): Promise<Result<ICommitResult, ResultError<CommitErrorCode>>> {
+        const startTime = Date.now();
+        const useFancy = shouldUseFancyOutput(this.caps);
+
+        // Only show header in TTY with color
+        if (useFancy && !this.options.quiet && !this.options.silent) {
+            log.header('Commit Wizard', `v${this.projectConfig.version}`);
+            log.divider();
+        }
+
+        // Step 1: Analyze repository
+        const stageSpinner = log.spinner('Staging...');
+        stageSpinner.start();
+        const stageResult = await this.stageAllChanges();
+        if (isErr(stageResult)) {
+            stageSpinner.fail('Failed to stage changes');
+            return stageResult as any;
+        }
+
+        const repoSpinner = log.spinner('Analyzing repository...');
+        repoSpinner.start();
+        const filesResult = await this.getRepositoryStatus();
+        if (isErr(filesResult)) {
+            repoSpinner.fail('Failed to read repository');
+            return filesResult as any;
+        }
+        const files = filesResult.value;
+
+        if (files.length === 0) {
+            repoSpinner.succeed('No changes to process');
+            return err({ type: 'NO_CHANGES', message: 'No changes to process' } as any);
+        }
+        repoSpinner.succeed(`${files.length} file${files.length !== 1 ? 's' : ''} changed`);
+
+        // Step 2: Calculate statistics
+        const statsSpinner = log.spinner('Calculating statistics...');
+        statsSpinner.start();
+        const stats = await this.getGitStats();
+
+        for (const file of files) {
+            if (file.status !== 'deleted') {
+                file.diff = await this.getFileDiff(file.path);
+                if (file.diff) {
+                    file.lines_added = (file.diff.match(/^\+[^+]/gm) || []).length;
+                    file.lines_removed = (file.diff.match(/^-[^-]/gm) || []).length;
+                    file.is_binary = file.diff.includes('Binary files differ');
+                }
+            }
+        }
+        statsSpinner.succeed(`+${stats.total_additions} -${stats.total_deletions} lines`);
+
+        // Build analysis context
+        const patternsPath = join(this.projectRoot, 'commit-templates/commit-patterns.md');
+        const commitPatterns = existsSync(patternsPath)
+            ? readFileSync(patternsPath, 'utf-8')
+            : 'No commit patterns found';
+
+        const analysis: ICommitAnalysis = {
+            files,
+            stats,
+            project_context: {
+                name: this.projectConfig.name,
+                description: this.projectConfig.description,
+                tech_stack: this.projectConfig.techStack,
+                target_platform: this.projectConfig.targetPlatform,
+            },
+            commit_patterns: commitPatterns,
+        };
+
+        const exhaustive = this.options.exhaustive || files.length > 50;
+        const extraContext = this.buildEnhancedContext();
+
+        // Step 3: AI generation
+        const providerBadge = formatProviderBadge(this.provider.name, this.caps);
+        const aiSpinner = log.spinner(`${providerBadge} Generating...`);
+        aiSpinner.start();
+        const aiResult = await this.analyzeWithAI(analysis, exhaustive, extraContext);
+        if (isErr(aiResult)) {
+            aiSpinner.fail('Generation failed');
+            return aiResult as any;
+        }
+        aiSpinner.succeed('Commit message generated');
+
+        // Parse proposals
+        const proposals = this.parseCommitProposals(aiResult.value);
+        if (proposals.length === 0) {
+            log.warn('No valid commit proposals found');
+            if (this.options.verbose) {
+                log.divider();
+                log.info(aiResult.value);
+                log.divider();
+            }
+            return err({ type: 'PARSE_ERROR', message: 'No valid commit proposals parsed' } as any);
+        }
+
+        // Show proposals - use simple format in CI, fancy in TTY
+        if (useFancy) {
+            log.cliTable(proposals.map((p, i) => ({
+                '#': i + 1,
+                title: p.title.substring(0, 60),
+                files: p.files?.length || 'all',
+            })));
+        } else {
+            for (let i = 0; i < proposals.length; i++) {
+                log.info(`${i + 1}. ${proposals[i].title}`);
+            }
+        }
+
+        // Show full proposals - use boxes only in TTY
+        if (useFancy) {
+            for (const p of proposals) {
+                log.box(
+                    [p.title, '', p.description, p.technical ? `\n<technical>\n${p.technical}\n</technical>` : '', p.changelog ? `\n<changelog>\n${p.changelog}\n</changelog>` : ''].filter(Boolean).join('\n'),
+                    { title: `Commit #${proposals.indexOf(p) + 1}`, borderStyle: 'single', padding: 1 },
+                );
+            }
+        }
+
+        // Step 4: Execute commits (if auto-approve)
+        let commitCount = 0;
+        let pushed = false;
+
+        if (this.options.autoApprove) {
+            const isValid = await this.validateAutoApprove();
+            if (!isValid) {
+                return err({ type: 'GIT_ERROR', message: 'Auto-approve validation failed' } as any);
+            }
+
+            for (let i = 0; i < proposals.length; i++) {
+                const commitSpinner = log.spinner(`Commit ${i + 1}/${proposals.length}...`);
+                commitSpinner.start();
+                const commitResult = await this.executeCommit(proposals[i], files);
+                if (isErr(commitResult) || !commitResult.value) {
+                    commitSpinner.fail('Commit failed');
+                } else {
+                    commitSpinner.succeed(proposals[i].title.split('\n')[0].substring(0, 50));
+                    commitCount++;
+                }
+            }
+
+            // Step 5: Push
+            if (commitCount > 0) {
+                const pushResult = await this.pushCommits();
+                pushed = !isErr(pushResult) && pushResult.value;
+            }
+        } else {
+            log.info('Use --auto-approve to execute commits');
+        }
+
+        const elapsed = Date.now() - startTime;
+
+        // Summary - subtle format
+        if (!this.options.quiet && !this.options.silent) {
+            if (useFancy) {
+                log.divider();
+            }
+            log.info(
+                `${commitCount} commit${commitCount !== 1 ? 's' : ''} ${this.options.autoApprove ? 'applied' : 'proposed'} · ${this.provider.name} · ${(elapsed / 1000).toFixed(1)}s${pushed ? ' · pushed' : ''}`
+            );
+        }
+
+        return ok({
+            proposals,
+            commitCount,
+            pushed,
+            providerName: this.provider.name,
+            modelName: this.provider.model,
+            elapsedMs: elapsed,
+        });
+    }
+}
+
+// ─── CLI Entry Point ─────────────────────────────────────────
+if (import.meta.main) {
+    const args = process.argv.slice(2);
+
+    if (args.includes('--help') || args.includes('-h')) {
+        log.header('Commit Wizard', 'AI-powered commit generation');
+        log.blank();
+        log.info('Usage: bun src/commit-generator.ts [options]');
+        log.blank();
+        log.info('Options:');
+        log.info('  --provider <name>            Provider: gemini-cli|gemini-sdk|groq|openrouter');
+        log.info('  --model <model-id>           Model override');
+        log.info('  --auto-approve               Execute commits automatically');
+        log.info('  --no-push                    Skip git push');
+        log.info('  --context <description>      Describe your changes');
+        log.info('  --work-type <type>           feature|bugfix|refactor|docs|test');
+        log.info('  --affected-components <list>  Components changed');
+        log.info('  --exhaustive                 Deep analysis mode');
+        log.info('  --dry-run                    Show proposals without executing');
+        log.info('  --json                       Output as JSON (implies dry-run)');
+        log.info('  --verbose, -v                Show debug output');
+        log.info('  --quiet, -q                  Only show errors and results');
+        log.info('  --silent                     No output (SDK mode)');
+        log.info('  --list-providers             Show available providers');
+        log.info('  --help, -h                   Show this help');
+        log.blank();
+        process.exit(0);
+    }
+
+    if (args.includes('--list-providers')) {
+        const caps = detectTerminalCapabilities();
+        const providers = listProviders();
+
+        if (shouldUseFancyOutput(caps)) {
+            log.header('Available Providers');
+            log.blank();
+            log.cliTable(
+                providers.map(p => ({
+                    status: p.available ? 'ready' : 'missing',
+                    provider: p.name,
+                    id: p.id,
+                    requirement: p.available ? '-' : p.requirement,
+                })),
+            );
+        } else {
+            for (const p of providers) {
+                log.info(`${p.available ? '✓' : '✗'} ${p.id.padEnd(12)} ${p.name}`);
+            }
+        }
+        log.blank();
+        process.exit(0);
+    }
+
+    const options = parseCliArgs(process.argv);
+    const generator = new CommitGenerator(options);
+    const result = await generator.generate();
+
+    if (isErr(result)) {
+        log.error(result.error.message);
+        process.exit(1);
+    }
 }

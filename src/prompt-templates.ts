@@ -1,61 +1,36 @@
 /**
- * Plantillas de prompts estandarizadas para AI commit analysis.
- * @description Asegura respuestas consistentes y parseables en todos los scripts.
- *   Supports dynamic project configuration — no longer hardcoded to a single project.
+ * Standardized prompt templates for AI commit analysis.
+ * Ensures consistent, parseable responses across all scripts.
+ * Supports dynamic project configuration.
+ *
+ * @module prompt-templates
  */
 
-export interface GeminiPromptConfig {
-  /** Contexto base del proyecto */
-  projectContext: {
-    name: string;
-    description: string;
-    version: string;
-    techStack: string[];
-    targetPlatform: string;
-  };
-  /** Tipo de análisis requerido */
-  analysisType: 'commit' | 'workflow' | 'release';
-  /** Contexto adicional específico */
-  specificContext?: string;
-  /** Datos estructurados para el análisis */
-  data?: any;
-  /** Project component map for monorepo awareness */
-  components?: Array<{ id: string; path: string; name: string }>;
-  /** Commit format preferences */
-  commitFormat?: {
-    titleLanguage?: string;
-    bodyLanguage?: string;
-    includeTechnical?: boolean;
-    includeChangelog?: boolean;
-  };
-}
+import type { IGeminiPromptConfig, IStandardResponseFormat } from './types/index.js';
 
-export interface StandardResponseFormat {
-  /** Análisis o resumen principal */
-  analysis: string;
-  /** Recomendaciones o acciones */
-  recommendations: string;
-  /** Datos estructurados (commits, comandos, etc.) */
-  structured_data: any[];
-}
+// Re-export types for backward compatibility
+export type { IGeminiPromptConfig as GeminiPromptConfig } from './types/index.js';
+export type { IStandardResponseFormat as StandardResponseFormat } from './types/index.js';
 
 /**
  * Default project config used as fallback when no config is loaded.
  * @deprecated Use loadProjectConfig() from project-config.ts instead.
  */
 export const TPV_PROJECT_CONFIG = {
-  name: 'Unknown Project',
-  description: 'Software project',
-  version: '0.0.0',
-  techStack: ['TypeScript'] as const,
-  targetPlatform: 'Cross-platform',
+    name: 'Unknown Project',
+    description: 'Software project',
+    version: '0.0.0',
+    techStack: ['TypeScript'] as const,
+    targetPlatform: 'Cross-platform',
 } as const;
 
 /**
  * Generate the standard prompt prefix with dynamic project context.
+ * @param ctx - Project context for the prompt
+ * @returns Formatted prompt prefix string
  */
-function createPromptPrefix(ctx: GeminiPromptConfig['projectContext']): string {
-  return `# Sistema de Análisis Inteligente - ${ctx.name}
+function createPromptPrefix(ctx: IGeminiPromptConfig['projectContext']): string {
+    return `# Sistema de Análisis Inteligente - ${ctx.name}
 
 Eres un asistente especializado en análisis de código y automatización para el proyecto ${ctx.name}. Tu función es proporcionar respuestas estructuradas, precisas y consistentes que puedan ser parseadas automáticamente.
 
@@ -78,9 +53,7 @@ Eres un asistente especializado en análisis de código y automatización para e
 `;
 }
 
-/**
- * Sufijo estándar con instrucciones de formato
- */
+/** Standard suffix with formatting instructions */
 const STANDARD_PROMPT_SUFFIX = `
 
 ---
@@ -96,24 +69,24 @@ const STANDARD_PROMPT_SUFFIX = `
 **IMPORTANTE**: La respuesta debe ser parseada automáticamente. Cualquier desviación del formato especificado causará errores en el sistema.`;
 
 /**
- * Genera prompt para análisis de commits
+ * Generate prompt for commit analysis.
+ * @param config - Prompt configuration with project context and data
+ * @returns Formatted commit analysis prompt
  */
-export function createCommitPrompt(config: GeminiPromptConfig): string {
-  const { data, specificContext, projectContext, components, commitFormat } = config;
-  const prefix = createPromptPrefix(projectContext);
+export function createCommitPrompt(config: IGeminiPromptConfig): string {
+    const { data, specificContext, projectContext, components, commitFormat } = config;
+    const prefix = createPromptPrefix(projectContext);
 
-  // Build components section if available
-  const componentsSection = components && components.length > 0
-    ? `\n## Componentes del Proyecto (Monorepo)\n${components.map(c => `- **${c.id}** → \`${c.path}\` — ${c.name}`).join('\n')}\n\nUsa el ID del componente como "área" en el prefijo del commit (ej: \`feat(web):\`, \`fix(agent-backend):\`).\n`
-    : '';
+    const componentsSection = components && components.length > 0
+        ? `\n## Componentes del Proyecto (Monorepo)\n${components.map(c => `- **${c.id}** → \`${c.path}\` — ${c.name}`).join('\n')}\n\nUsa el ID del componente como "área" en el prefijo del commit (ej: \`feat(web):\`, \`fix(agent-backend):\`).\n`
+        : '';
 
-  // Build commit format instructions
-  const titleLang = commitFormat?.titleLanguage || 'english';
-  const bodyLang = commitFormat?.bodyLanguage || 'spanish';
-  const includeTech = commitFormat?.includeTechnical !== false;
-  const includeChangelog = commitFormat?.includeChangelog !== false;
+    const titleLang = commitFormat?.titleLanguage || 'english';
+    const bodyLang = commitFormat?.bodyLanguage || 'spanish';
+    const includeTech = commitFormat?.includeTechnical !== false;
+    const includeChangelog = commitFormat?.includeChangelog !== false;
 
-  const formatInstructions = `
+    const formatInstructions = `
 ## REGLAS DE IDIOMA Y FORMATO
 - **Título del commit**: en **${titleLang}**
 - **Descripción/body del commit**: en **${bodyLang}**
@@ -121,7 +94,7 @@ export function createCommitPrompt(config: GeminiPromptConfig): string {
 - **Sección <changelog>**: ${includeChangelog ? 'OBLIGATORIA — incluir siempre' : 'OMITIR'}
 `;
 
-  return `${prefix}
+    return `${prefix}
 ${componentsSection}
 # ANÁLISIS DE COMMITS
 ${formatInstructions}
@@ -172,13 +145,15 @@ ${STANDARD_PROMPT_SUFFIX}`;
 }
 
 /**
- * Genera prompt para asistente de workflow
+ * Generate prompt for workflow assistant.
+ * @param config - Prompt configuration with project context and data
+ * @returns Formatted workflow prompt
  */
-export function createWorkflowPrompt(config: GeminiPromptConfig): string {
-  const { data, specificContext, projectContext } = config;
-  const prefix = createPromptPrefix(projectContext);
+export function createWorkflowPrompt(config: IGeminiPromptConfig): string {
+    const { data, specificContext, projectContext } = config;
+    const prefix = createPromptPrefix(projectContext);
 
-  return `${prefix}
+    return `${prefix}
 
 # ASISTENTE DE WORKFLOW
 
@@ -202,7 +177,7 @@ ${JSON.stringify(data, null, 2)}
 # [Descripción del primer comando]
 [comando exacto con parámetros]
 
-# [Descripción del segundo comando]  
+# [Descripción del segundo comando]
 [segundo comando exacto]
 \`\`\`
 
@@ -224,13 +199,15 @@ ${STANDARD_PROMPT_SUFFIX}`;
 }
 
 /**
- * Genera prompt para releases automáticas
+ * Generate prompt for automatic releases.
+ * @param config - Prompt configuration with project context and data
+ * @returns Formatted release analysis prompt
  */
-export function createReleasePrompt(config: GeminiPromptConfig): string {
-  const { data, specificContext, projectContext } = config;
-  const prefix = createPromptPrefix(projectContext);
+export function createReleasePrompt(config: IGeminiPromptConfig): string {
+    const { data, specificContext, projectContext } = config;
+    const prefix = createPromptPrefix(projectContext);
 
-  return `${prefix}
+    return `${prefix}
 
 # ANÁLISIS DE RELEASE
 
@@ -278,176 +255,177 @@ ${STANDARD_PROMPT_SUFFIX}`;
 }
 
 /**
- * Parser genérico para respuestas de Gemini
+ * Generic parser for Gemini AI responses.
+ * Extracts structured data from formatted markdown responses.
  */
 export class GeminiResponseParser {
-  /**
-   * Extrae múltiples propuestas de commit del formato estándar
-   */
-  static parseCommitProposals(response: string): Array<{
-    title: string;
-    description: string;
-    technical: string;
-    changelog: string;
-  }> {
-    const proposals: Array<{
-      title: string;
-      description: string; 
-      technical: string;
-      changelog: string;
-    }> = [];
+    /**
+     * Extract multiple commit proposals from standard format.
+     * @param response - Raw AI response text
+     * @returns Array of parsed commit proposals
+     */
+    static parseCommitProposals(response: string): Array<{
+        title: string;
+        description: string;
+        technical: string;
+        changelog: string;
+    }> {
+        const proposals: Array<{
+            title: string;
+            description: string;
+            technical: string;
+            changelog: string;
+        }> = [];
 
-    // Buscar todas las propuestas con el formato: ### **Propuesta de Commit #N**
-    const proposalPattern = /###\s*\*\*Propuesta de Commit #\d+\*\*/g;
-    const proposalMatches = Array.from(response.matchAll(proposalPattern));
-    
-    if (proposalMatches.length === 0) {
-      // Formato de un solo commit sin numeración
-      const codeBlock = this.extractCodeBlock(response);
-      if (codeBlock) {
-        const parsed = this.parseCommitContent(codeBlock);
-        if (parsed) proposals.push(parsed);
-      }
-    } else {
-      // Múltiples propuestas numeradas
-      for (let i = 0; i < proposalMatches.length; i++) {
-        const startIndex = proposalMatches[i].index!;
-        const endIndex = proposalMatches[i + 1]?.index || response.length;
-        const proposalSection = response.substring(startIndex, endIndex);
-        
-        const codeBlock = this.extractCodeBlock(proposalSection);
-        if (codeBlock) {
-          const parsed = this.parseCommitContent(codeBlock);
-          if (parsed) proposals.push(parsed);
+        const proposalPattern = /###\s*\*\*Propuesta de Commit #\d+\*\*/g;
+        const proposalMatches = Array.from(response.matchAll(proposalPattern));
+
+        if (proposalMatches.length === 0) {
+            const codeBlock = this.extractCodeBlock(response);
+            if (codeBlock) {
+                const parsed = this.parseCommitContent(codeBlock);
+                if (parsed) proposals.push(parsed);
+            }
+        } else {
+            for (let i = 0; i < proposalMatches.length; i++) {
+                const startIndex = proposalMatches[i].index!;
+                const endIndex = proposalMatches[i + 1]?.index || response.length;
+                const proposalSection = response.substring(startIndex, endIndex);
+
+                const codeBlock = this.extractCodeBlock(proposalSection);
+                if (codeBlock) {
+                    const parsed = this.parseCommitContent(codeBlock);
+                    if (parsed) proposals.push(parsed);
+                }
+            }
         }
-      }
+
+        return proposals;
     }
 
-    return proposals;
-  }
+    /**
+     * Extract a markdown code block from text.
+     * @param text - Text containing a code block
+     * @returns Extracted code block content, or null
+     */
+    private static extractCodeBlock(text: string): string | null {
+        const patterns = [
+            /```markdown\s*\n([\s\S]*?)\n```/,
+            /```\s*\n([\s\S]*?)\n```/,
+            /```([\s\S]*?)```/,
+        ];
 
-  /**
-   * Extrae bloque de código markdown
-   */
-  private static extractCodeBlock(text: string): string | null {
-    const patterns = [
-      /```markdown\s*\n([\s\S]*?)\n```/,  // ```markdown
-      /```\s*\n([\s\S]*?)\n```/,        // ``` genérico  
-      /```([\s\S]*?)```/                 // sin saltos
-    ];
-    
-    for (const pattern of patterns) {
-      const match = text.match(pattern);
-      if (match) return match[1].trim();
-    }
-    
-    return null;
-  }
+        for (const pattern of patterns) {
+            const match = text.match(pattern);
+            if (match) return match[1].trim();
+        }
 
-  /**
-   * Parsea el contenido de un commit individual
-   */
-  private static parseCommitContent(content: string): {
-    title: string;
-    description: string;
-    technical: string;
-    changelog: string;
-  } | null {
-    const lines = content.split('\n');
-    
-    // Título (primera línea no vacía)
-    let title = '';
-    let titleIndex = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].trim()) {
-        title = lines[i].trim();
-        titleIndex = i;
-        break;
-      }
+        return null;
     }
 
-    if (!title) return null;
+    /**
+     * Parse the content of an individual commit proposal.
+     * @param content - Raw commit content string
+     * @returns Parsed commit object, or null if unparseable
+     */
+    private static parseCommitContent(content: string): {
+        title: string;
+        description: string;
+        technical: string;
+        changelog: string;
+    } | null {
+        const lines = content.split('\n');
 
-    // Extraer secciones
-    let description = '';
-    let technical = '';
-    let changelog = '';
-    let currentSection = 'description';
+        let title = '';
+        let titleIndex = 0;
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].trim()) {
+                title = lines[i].trim();
+                titleIndex = i;
+                break;
+            }
+        }
 
-    for (let i = titleIndex + 1; i < lines.length; i++) {
-      const line = lines[i];
+        if (!title) return null;
 
-      if (line.includes('<technical>')) {
-        currentSection = 'technical';
-        continue;
-      } else if (line.includes('</technical>')) {
-        currentSection = 'none';
-        continue;
-      } else if (line.includes('<changelog>')) {
-        currentSection = 'changelog';
-        continue;
-      } else if (line.includes('</changelog>')) {
-        currentSection = 'none';
-        continue;
-      }
+        let description = '';
+        let technical = '';
+        let changelog = '';
+        let currentSection = 'description';
 
-      if (currentSection === 'description' && line.trim()) {
-        description += line + '\n';
-      } else if (currentSection === 'technical') {
-        technical += line + '\n';
-      } else if (currentSection === 'changelog') {
-        changelog += line + '\n';
-      }
+        for (let i = titleIndex + 1; i < lines.length; i++) {
+            const line = lines[i];
+
+            if (line.includes('<technical>')) {
+                currentSection = 'technical';
+                continue;
+            } else if (line.includes('</technical>')) {
+                currentSection = 'none';
+                continue;
+            } else if (line.includes('<changelog>')) {
+                currentSection = 'changelog';
+                continue;
+            } else if (line.includes('</changelog>')) {
+                currentSection = 'none';
+                continue;
+            }
+
+            if (currentSection === 'description' && line.trim()) {
+                description += line + '\n';
+            } else if (currentSection === 'technical') {
+                technical += line + '\n';
+            } else if (currentSection === 'changelog') {
+                changelog += line + '\n';
+            }
+        }
+
+        return {
+            title,
+            description: description.trim(),
+            technical: technical.trim(),
+            changelog: changelog.trim(),
+        };
     }
 
-    return {
-      title,
-      description: description.trim(),
-      technical: technical.trim(),
-      changelog: changelog.trim()
-    };
-  }
+    /**
+     * Parse workflow response into standard format.
+     * @param response - Raw AI workflow response
+     * @returns Parsed workflow data
+     */
+    static parseWorkflowResponse(response: string): {
+        analysis: string;
+        impact: string;
+        recommendation: string;
+        macosCommands: string[];
+        linuxCommands: string[];
+        verifications: string[];
+    } {
+        const analysisMatch = response.match(/🎯\s*\*\*ANÁLISIS\*\*:\s*(.+)/);
+        const impactMatch = response.match(/📊\s*\*\*IMPACTO\*\*:\s*(.+)/);
+        const recommendationMatch = response.match(/🚀\s*\*\*RECOMENDACIÓN\*\*:\s*(.+)/);
 
-  /**
-   * Parsea respuesta de workflow en formato estándar
-   */
-  static parseWorkflowResponse(response: string): {
-    analysis: string;
-    impact: string;
-    recommendation: string;
-    macosCommands: string[];
-    linuxCommands: string[];
-    verifications: string[];
-  } {
-    const analysisMatch = response.match(/🎯\s*\*\*ANÁLISIS\*\*:\s*(.+)/);
-    const impactMatch = response.match(/📊\s*\*\*IMPACTO\*\*:\s*(.+)/);
-    const recommendationMatch = response.match(/🚀\s*\*\*RECOMENDACIÓN\*\*:\s*(.+)/);
+        const macosSection = response.match(/##\s*🖥️\s*COMANDOS PARA macOS\s*```bash\s*([\s\S]*?)\s*```/);
+        const macosCommands = macosSection ? macosSection[1].split('\n').filter(line =>
+            line.trim() && !line.startsWith('#'),
+        ) : [];
 
-    // Extraer comandos macOS
-    const macosSection = response.match(/##\s*🖥️\s*COMANDOS PARA macOS\s*```bash\s*([\s\S]*?)\s*```/);
-    const macosCommands = macosSection ? macosSection[1].split('\n').filter(line => 
-      line.trim() && !line.startsWith('#')
-    ) : [];
+        const linuxSection = response.match(/##\s*🐧\s*COMANDOS PARA LINUX ARM[\s\S]*?```bash\s*([\s\S]*?)\s*```/);
+        const linuxCommands = linuxSection ? linuxSection[1].split('\n').filter(line =>
+            line.trim() && !line.startsWith('#'),
+        ) : [];
 
-    // Extraer comandos Linux ARM
-    const linuxSection = response.match(/##\s*🐧\s*COMANDOS PARA LINUX ARM[\s\S]*?```bash\s*([\s\S]*?)\s*```/);
-    const linuxCommands = linuxSection ? linuxSection[1].split('\n').filter(line => 
-      line.trim() && !line.startsWith('#')
-    ) : [];
+        const verificationsSection = response.match(/##\s*✅\s*VERIFICACIONES AUTOMÁTICAS\s*([\s\S]*?)```/);
+        const verifications = verificationsSection ? verificationsSection[1].split('\n').filter(line =>
+            line.trim().startsWith('-'),
+        ).map(line => line.replace(/^-\s*/, '')) : [];
 
-    // Extraer verificaciones
-    const verificationsSection = response.match(/##\s*✅\s*VERIFICACIONES AUTOMÁTICAS\s*([\s\S]*?)```/);
-    const verifications = verificationsSection ? verificationsSection[1].split('\n').filter(line =>
-      line.trim().startsWith('-')
-    ).map(line => line.replace(/^-\s*/, '')) : [];
-
-    return {
-      analysis: analysisMatch?.[1] || 'No disponible',
-      impact: impactMatch?.[1] || 'No disponible', 
-      recommendation: recommendationMatch?.[1] || 'No disponible',
-      macosCommands,
-      linuxCommands,
-      verifications
-    };
-  }
+        return {
+            analysis: analysisMatch?.[1] || 'No disponible',
+            impact: impactMatch?.[1] || 'No disponible',
+            recommendation: recommendationMatch?.[1] || 'No disponible',
+            macosCommands,
+            linuxCommands,
+            verifications,
+        };
+    }
 }

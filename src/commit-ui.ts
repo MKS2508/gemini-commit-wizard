@@ -1,255 +1,338 @@
 #!/usr/bin/env bun
 
-import { execSync } from "child_process"
-import { platform } from "os"
+/**
+ * Interactive commit UI.
+ * Uses native macOS dialogs (osascript), Linux zenity, or @inquirer/prompts as fallback.
+ * Now imports CommitGenerator directly instead of shelling out.
+ *
+ * @module commit-ui
+ */
 
-interface CommitOptions {
-  context: string
-  workType: string
-  affectedComponents: string[]
-  scope?: string
-  breakingChange?: boolean
-  performanceImpact?: string
-}
+import { execSync } from 'child_process';
+import { platform } from 'os';
+import { Logger } from '@mks2508/better-logger';
+import { isErr } from '@mks2508/no-throw';
+import { CommitGenerator } from './commit-generator';
+import { loadProjectConfig } from './project-config';
+import { detectTerminalCapabilities, shouldUseFancyOutput } from './utils/index.js';
+import type { ICommitOptions, ICommitGeneratorOptions } from './types/index.js';
 
+const log = new Logger();
+
+/**
+ * Interactive commit UI that collects user input via native dialogs
+ * or terminal prompts, then delegates to CommitGenerator.
+ *
+ * @example
+ * ```typescript
+ * const ui = new CommitUI({ noPush: true });
+ * await ui.run();
+ * ```
+ */
 class CommitUI {
-  private platform = platform()
+    private currentPlatform = platform();
+    private baseOptions: Partial<ICommitGeneratorOptions>;
 
-  async collectCommitInfo(): Promise<CommitOptions> {
-    console.log("🚀 Interactive Commit Generator")
-    console.log("================================")
-
-    try {
-      if (this.platform === "darwin") {
-        return await this.macOSDialog()
-      } else if (this.platform === "linux") {
-        return await this.linuxDialog()
-      } else {
-        return await this.fallbackDialog()
-      }
-    } catch (error) {
-      console.log("⚠️ GUI not available, falling back to text input")
-      return await this.fallbackDialog()
+    /**
+     * @param baseOptions - Base options passed through to CommitGenerator
+     */
+    constructor(baseOptions: Partial<ICommitGeneratorOptions> = {}) {
+        this.baseOptions = baseOptions;
     }
-  }
 
-  private async macOSDialog(): Promise<CommitOptions> {
-    // Create a unified form using AppleScript
-    const formScript = `
+    /**
+     * Collect commit info from the user via platform-appropriate UI.
+     * @returns User-provided commit options
+     */
+    async collectCommitInfo(): Promise<ICommitOptions> {
+        const caps = detectTerminalCapabilities();
+        const useFancy = shouldUseFancyOutput(caps);
+
+        if (useFancy) {
+            log.header('Commit Wizard', 'Interactive Mode');
+            log.divider();
+        }
+
+        try {
+            if (this.currentPlatform === 'darwin') {
+                return await this.macOSDialog();
+            } else if (this.currentPlatform === 'linux') {
+                return await this.linuxDialog();
+            } else {
+                return await this.fallbackDialog();
+            }
+        } catch (error) {
+            log.warn('GUI not available, falling back to terminal prompts');
+            return await this.fallbackDialog();
+        }
+    }
+
+    /**
+     * macOS native dialog flow using osascript JXA.
+     * @returns Commit options collected from AppleScript dialogs
+     */
+    private async macOSDialog(): Promise<ICommitOptions> {
+        const formScript = `
       const app = Application.currentApplication()
       app.includeStandardAdditions = true
-      
-      // First get the context text
-      const contextResult = app.displayDialog("📝 Commit Generator\\n\\nDescribe what you implemented/fixed:", {
+
+      const contextResult = app.displayDialog("Commit Generator\\n\\nDescribe what you implemented/fixed:", {
         defaultAnswer: "",
-        withTitle: "🚀 Interactive Commit",
-        buttons: ["Cancel", "Next →"],
-        defaultButton: "Next →"
+        withTitle: "Interactive Commit",
+        buttons: ["Cancel", "Next"],
+        defaultButton: "Next"
       })
-      
+
       const context = contextResult.textReturned
-      
-      // Then get work type
+
       const workTypes = ["feature", "fix", "refactor", "docs", "test"]
       const workTypeResult = app.chooseFromList(workTypes, {
-        withTitle: "🚀 Interactive Commit - Work Type",
+        withTitle: "Interactive Commit - Work Type",
         withPrompt: "Context: " + context + "\\n\\nSelect work type:",
         defaultItems: ["feature"]
       })
-      
+
       if (workTypeResult === false) {
         throw new Error("Cancelled")
       }
-      
+
       const workType = workTypeResult[0]
-      
-      // Then get components
-      const components = ["ui", "api", "core", "docs", "tests"]
+
+      const components = ${JSON.stringify(this.getComponentChoices())}
       const componentsResult = app.chooseFromList(components, {
-        withTitle: "🚀 Interactive Commit - Components",
+        withTitle: "Interactive Commit - Components",
         withPrompt: "Context: " + context + "\\nType: " + workType + "\\n\\nSelect affected components:",
         multipleSelectionsAllowed: true,
         defaultItems: ["core"]
       })
-      
+
       if (componentsResult === false) {
         throw new Error("Cancelled")
       }
-      
+
       const affectedComponents = componentsResult.join(",")
-      
-      // Finally get performance impact
+
       const impacts = ["none", "minor", "major"]
       const performanceResult = app.chooseFromList(impacts, {
-        withTitle: "🚀 Interactive Commit - Performance",
+        withTitle: "Interactive Commit - Performance",
         withPrompt: "Context: " + context + "\\nType: " + workType + "\\nComponents: " + affectedComponents + "\\n\\nPerformance impact:",
         defaultItems: ["none"]
       })
-      
+
       const performanceImpact = performanceResult === false ? "none" : performanceResult[0]
-      
-      // Return all values as JSON
+
       JSON.stringify({
         context: context,
         workType: workType,
         affectedComponents: affectedComponents,
         performanceImpact: performanceImpact
       })
-    `
-    
-    const result = execSync(`osascript -l JavaScript -e '${formScript}'`, { encoding: 'utf-8' }).trim()
-    const parsed = JSON.parse(result)
+    `;
 
-    return {
-      context: parsed.context,
-      workType: parsed.workType,
-      affectedComponents: parsed.affectedComponents.split(","),
-      performanceImpact: parsed.performanceImpact
-    }
-  }
+        const result = execSync(`osascript -l JavaScript -e '${formScript}'`, { encoding: 'utf-8' }).trim();
+        const parsed = JSON.parse(result);
 
-  private async linuxDialog(): Promise<CommitOptions> {
-    // Check if zenity is available
-    try {
-      execSync("which zenity", { stdio: 'ignore' })
-    } catch {
-      throw new Error("zenity not available")
+        return {
+            context: parsed.context,
+            workType: parsed.workType,
+            affectedComponents: parsed.affectedComponents.split(','),
+            performanceImpact: parsed.performanceImpact,
+        };
     }
 
-    // Context Input first
-    const context = execSync(`zenity --entry --title="🚀 Interactive Commit" --text="📝 Describe what you implemented/fixed:" --width=400`, { encoding: 'utf-8' }).trim()
+    /**
+     * Linux dialog flow using zenity.
+     * @returns Commit options collected from zenity dialogs
+     */
+    private async linuxDialog(): Promise<ICommitOptions> {
+        try {
+            execSync('which zenity', { stdio: 'ignore' });
+        } catch {
+            throw new Error('zenity not available');
+        }
 
-    // Work Type Selection with context shown
-    const workType = execSync(`zenity --list --title="🚀 Interactive Commit - Work Type" --text="Context: ${context}\\n\\nSelect work type:" --radiolist --column="Select" --column="Type" --column="Description" --width=450 --height=300 \\
+        const context = execSync(
+            `zenity --entry --title="Interactive Commit" --text="Describe what you implemented/fixed:" --width=400`,
+            { encoding: 'utf-8' },
+        ).trim();
+
+        const workType = execSync(
+            `zenity --list --title="Interactive Commit - Work Type" --text="Context: ${context}\\n\\nSelect work type:" --radiolist --column="Select" --column="Type" --column="Description" --width=450 --height=300 \\
       TRUE "feature" "New functionality" \\
       FALSE "fix" "Bug fixes" \\
       FALSE "refactor" "Code refactoring" \\
       FALSE "docs" "Documentation" \\
-      FALSE "test" "Tests"`, { encoding: 'utf-8' }).trim()
+      FALSE "test" "Tests"`,
+            { encoding: 'utf-8' },
+        ).trim();
 
-    // Components Selection with previous values shown
-    const componentsResult = execSync(`zenity --list --title="🚀 Interactive Commit - Components" --text="Context: ${context}\\nType: ${workType}\\n\\nSelect affected components:" --checklist --column="Select" --column="Component" --width=450 --height=300 \\
+        const componentsResult = execSync(
+            `zenity --list --title="Interactive Commit - Components" --text="Context: ${context}\\nType: ${workType}\\n\\nSelect affected components:" --checklist --column="Select" --column="Component" --width=450 --height=300 \\
       TRUE "core" \\
       FALSE "ui" \\
       FALSE "api" \\
       FALSE "docs" \\
-      FALSE "tests"`, { encoding: 'utf-8' }).trim()
-    
-    const affectedComponents = componentsResult.split("|").filter(Boolean)
+      FALSE "tests"`,
+            { encoding: 'utf-8' },
+        ).trim();
 
-    // Performance Impact with summary
-    const performanceImpact = execSync(`zenity --list --title="🚀 Interactive Commit - Performance" --text="Context: ${context}\\nType: ${workType}\\nComponents: ${affectedComponents.join(', ')}\\n\\nSelect performance impact:" --radiolist --column="Select" --column="Impact" --width=450 --height=250 \\
+        const affectedComponents = componentsResult.split('|').filter(Boolean);
+
+        const performanceImpact = execSync(
+            `zenity --list --title="Interactive Commit - Performance" --text="Context: ${context}\\nType: ${workType}\\nComponents: ${affectedComponents.join(', ')}\\n\\nSelect performance impact:" --radiolist --column="Select" --column="Impact" --width=450 --height=250 \\
       TRUE "none" \\
       FALSE "minor" \\
-      FALSE "major"`, { encoding: 'utf-8' }).trim()
+      FALSE "major"`,
+            { encoding: 'utf-8' },
+        ).trim();
 
-    return {
-      context,
-      workType,
-      affectedComponents,
-      performanceImpact
-    }
-  }
-
-  private async fallbackDialog(): Promise<CommitOptions> {
-    const readline = require('readline').createInterface({
-      input: process.stdin,
-      output: process.stdout
-    })
-
-    const question = (prompt: string): Promise<string> => {
-      return new Promise((resolve) => {
-        readline.question(prompt, resolve)
-      })
+        return {
+            context,
+            workType,
+            affectedComponents,
+            performanceImpact,
+        };
     }
 
-    console.log("\n📝 Text-based commit input")
-    
-    const workType = await question("Work type (feature/fix/refactor/docs/test): ") || "feature"
-    const context = await question("Describe what you implemented/fixed: ")
-    const componentsInput = await question("Components changed (ui,api,core,docs,tests): ") || "core"
-    const affectedComponents = componentsInput.split(",").map(c => c.trim())
-    const performanceImpact = await question("Performance impact (none/minor/major): ") || "none"
+    /**
+     * Terminal fallback using @inquirer/prompts for a rich CLI experience.
+     * @returns Commit options collected from terminal prompts
+     */
+    private async fallbackDialog(): Promise<ICommitOptions> {
+        const { input, select, checkbox } = await import('@inquirer/prompts');
 
-    readline.close()
+        const context = await input({
+            message: 'What did you implement/fix?',
+            validate: (v: string) => v.length > 0 || 'Description is required',
+        });
 
-    return {
-      context,
-      workType,
-      affectedComponents,
-      performanceImpact
-    }
-  }
+        const workType = await select({
+            message: 'Work type:',
+            choices: [
+                { value: 'feature', name: 'Feature - New functionality' },
+                { value: 'fix', name: 'Fix - Bug correction' },
+                { value: 'refactor', name: 'Refactor - Code improvement' },
+                { value: 'docs', name: 'Docs - Documentation update' },
+                { value: 'test', name: 'Test - Tests' },
+            ],
+        });
 
-  async generateCommit(options: CommitOptions): Promise<void> {
-    const args = [
-      "--context", `"${options.context}"`,
-      "--work-type", options.workType,
-      "--affected-components", options.affectedComponents.join(",")
-    ]
+        const choices = this.getComponentChoices().map(c => ({ value: c, name: c }));
+        const affectedComponents = await checkbox({
+            message: 'Components changed:',
+            choices,
+        });
 
-    if (options.performanceImpact && options.performanceImpact !== "none") {
-      args.push("--performance-impact", options.performanceImpact)
-    }
-
-    // Pass through --provider and --model from CLI args
-    const cliArgs = process.argv.slice(2)
-    const providerIdx = cliArgs.indexOf("--provider")
-    if (providerIdx > -1 && cliArgs[providerIdx + 1]) {
-      args.push("--provider", cliArgs[providerIdx + 1])
-    }
-    const modelIdx = cliArgs.indexOf("--model")
-    if (modelIdx > -1 && cliArgs[modelIdx + 1]) {
-      args.push("--model", cliArgs[modelIdx + 1])
+        return {
+            context,
+            workType,
+            affectedComponents: affectedComponents.length > 0 ? affectedComponents : ['core'],
+        };
     }
 
-    console.log("\n🔄 Generating commit...")
-    console.log(`📋 Context: ${options.context}`)
-    console.log(`🏷️ Type: ${options.workType}`)
-    console.log(`📦 Components: ${options.affectedComponents.join(", ")}`)
-    console.log(`⚡ Performance: ${options.performanceImpact}`)
-
-    const command = `bun src/commit-generator.ts ${args.join(" ")} --auto-approve`
-    console.log(`\n🚀 Running: ${command}`)
-
-    try {
-      execSync(command, { stdio: 'inherit' })
-      console.log("✅ Commits executed successfully!")
-    } catch (error) {
-      console.error("❌ Error executing commits:", error)
-      process.exit(1)
+    /**
+     * Get component choices from project config or defaults.
+     * @returns Array of component names
+     */
+    private getComponentChoices(): string[] {
+        try {
+            const config = loadProjectConfig(process.cwd());
+            if (config.components && config.components.length > 0) {
+                return config.components.map(c => c.id);
+            }
+        } catch {
+            // ignore
+        }
+        return ['ui', 'api', 'core', 'docs', 'tests'];
     }
-  }
+
+    /**
+     * Run the full interactive commit flow.
+     * Collects info, shows summary, then delegates to CommitGenerator.
+     */
+    async run(): Promise<void> {
+        const options = await this.collectCommitInfo();
+
+        // Show summary before generation - adaptive format
+        const caps = detectTerminalCapabilities();
+        const useFancy = shouldUseFancyOutput(caps);
+
+        if (useFancy) {
+            log.blank();
+            log.box(
+                [
+                    `Context:    ${options.context}`,
+                    `Type:       ${options.workType}`,
+                    `Components: ${options.affectedComponents.join(', ')}`,
+                    options.performanceImpact ? `Performance: ${options.performanceImpact}` : '',
+                ].filter(Boolean).join('\n'),
+                { title: 'Commit Info', borderStyle: 'single', padding: 1 },
+            );
+        } else {
+            log.info(`Commit: ${options.workType}(${options.affectedComponents.join(',')})`);
+            log.info(`  ${options.context}`);
+        }
+
+        // Pass through CLI args for provider/model
+        const cliArgs = process.argv.slice(2);
+        const getArg = (flag: string): string | undefined => {
+            const idx = cliArgs.indexOf(flag);
+            return idx > -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : undefined;
+        };
+
+        const generator = new CommitGenerator({
+            ...this.baseOptions,
+            provider: getArg('--provider') as any,
+            model: getArg('--model'),
+            context: options.context,
+            workType: options.workType,
+            affectedComponents: options.affectedComponents.join(','),
+            autoApprove: true,
+        });
+
+        const result = await generator.generate();
+        if (isErr(result)) {
+            log.error(`Commit generation failed: ${result.error.message}`);
+            process.exit(1);
+        }
+
+        log.success('Done');
+    }
 }
 
+// ─── CLI Entry Point ─────────────────────────────────────────
 async function main() {
-  const ui = new CommitUI()
-  
-  // Check for quick mode
-  if (process.argv.includes("--quick")) {
-    const quickOptions: CommitOptions = {
-      context: "Quick commit via UI",
-      workType: "feature",
-      affectedComponents: ["core"],
-      performanceImpact: "none"
+    const ui = new CommitUI();
+
+    if (process.argv.includes('--quick')) {
+        const generator = new CommitGenerator({
+            context: 'Quick commit via UI',
+            workType: 'feature',
+            affectedComponents: 'core',
+            autoApprove: true,
+        });
+        const result = await generator.generate();
+        if (isErr(result)) {
+            log.error(result.error.message);
+            process.exit(1);
+        }
+        return;
     }
-    await ui.generateCommit(quickOptions)
-    return
-  }
-  
-  try {
-    const options = await ui.collectCommitInfo()
-    await ui.generateCommit(options)
-  } catch (error) {
-    if (error instanceof Error && error.message === "Cancelled") {
-      console.log("❌ Commit cancelled by user")
-      process.exit(0)
+
+    try {
+        await ui.run();
+    } catch (error) {
+        if (error instanceof Error && error.message === 'Cancelled') {
+            log.info('Commit cancelled by user');
+            process.exit(0);
+        }
+        log.error(`Error: ${error}`);
+        process.exit(1);
     }
-    console.error("❌ Error:", error)
-    process.exit(1)
-  }
 }
 
 if (import.meta.main) {
-  main()
+    main();
 }
+
+export { CommitUI };
