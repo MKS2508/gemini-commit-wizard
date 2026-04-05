@@ -60,3 +60,12 @@ export interface IAutoReleaseInfo {
     /** Patch version number */
     patch: number;
 }
+
+/**
+ * Error codes for GitHub release operations.
+ */
+export type ReleaseErrorCode =
+    | 'RELEASE_ERROR' // General release operation error
+    | 'GIT_ERROR' // Git command failure
+    | 'GITHUB_CLI_ERROR' // GitHub CLI not available or failed
+    | 'FILE_READ_ERROR'; // Failed to read changelog
