@@ -66,13 +66,3 @@ export interface IVersionCommitInfo {
     /** Extracted changelog section */
     changelog_section?: string;
 }
-
-/**
- * Error codes for version management operations.
- */
-export type VersionErrorCode =
-    | 'VERSION_ERROR' // General version operation error
-    | 'NO_CHANGES' // No new commits to version
-    | 'GIT_ERROR' // Git command failure
-    | 'FILE_WRITE_ERROR' // Failed to write changelog/config
-    | 'INVALID_VERSION'; // Invalid version string

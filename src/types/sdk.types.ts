@@ -89,19 +89,25 @@ export type CommitErrorCode =
  * Error codes for version management failures.
  */
 export type VersionErrorCode =
+    | 'VERSION_ERROR'
     | 'GIT_ERROR'
     | 'VERSION_PARSE_ERROR'
     | 'CHANGELOG_ERROR'
-    | 'FILE_WRITE_ERROR';
+    | 'FILE_WRITE_ERROR'
+    | 'NO_CHANGES'
+    | 'INVALID_VERSION';
 
 /**
  * Error codes for GitHub release failures.
  */
 export type ReleaseErrorCode =
+    | 'RELEASE_ERROR'
     | 'GIT_ERROR'
     | 'BUILD_ERROR'
     | 'GITHUB_ERROR'
-    | 'PROVIDER_ERROR';
+    | 'GITHUB_CLI_ERROR'
+    | 'PROVIDER_ERROR'
+    | 'FILE_READ_ERROR';
 
 /**
  * Git operation result type alias for convenience.

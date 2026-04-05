@@ -89,13 +89,3 @@ export interface ICommitOptions {
     /** Performance impact description */
     performanceImpact?: string;
 }
-
-/**
- * Error codes for commit generation operations.
- */
-export type CommitErrorCode =
-    | 'NO_CHANGES' // No staged changes
-    | 'GIT_ERROR' // Git command failure
-    | 'PROVIDER_ERROR' // AI provider failure
-    | 'STAGING_ERROR' // Failed to stage changes
-    | 'COMMIT_EXEC_ERROR'; // Failed to execute commit
