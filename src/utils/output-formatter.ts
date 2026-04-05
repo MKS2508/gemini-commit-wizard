@@ -5,6 +5,7 @@
  */
 
 import { Logger, stylePresets } from '@mks2508/better-logger';
+import { detectTerminalCapabilities } from './environment.js';
 import type { ITerminalCapabilities } from './environment.js';
 
 const log = new Logger();
