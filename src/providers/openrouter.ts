@@ -58,8 +58,7 @@ export class OpenRouterProvider implements IAIProvider {
         const result = await client.chat.send({
             model: this.model,
             messages: [{ role: 'user', content: prompt }],
-            stream: false,
-        });
+        } as any);
 
         return (result as any).choices?.[0]?.message?.content || '';
     }
