@@ -8,7 +8,16 @@
  * @module git-utils
  */
 
-import { simpleGit, SimpleGit, StatusResult, LogResult } from 'simple-git';
+import simpleGit from 'simple-git';
+import type {
+    SimpleGit,
+    StatusResult,
+    LogResult,
+    CommitResult,
+    PushResult,
+    PullResult,
+    FetchResult,
+} from 'simple-git';
 import { ok, err, type Result } from '@mks2508/no-throw';
 import type { IGitFileStatus, IGitCommitInfo } from './types/index.js';
 
@@ -273,7 +282,7 @@ export async function gitAdd(files: string | string[], repoPath?: string): Promi
  * @param repoPath - Repository path (defaults to cwd)
  * @returns Commit result
  */
-export async function gitCommit(message: string, repoPath?: string): Promise<Result<string, Error>> {
+export async function gitCommit(message: string, repoPath?: string): Promise<Result<CommitResult, Error>> {
     try {
         const git = simpleGit(repoPath);
         const result = await git.commit(message);
@@ -290,7 +299,7 @@ export async function gitCommit(message: string, repoPath?: string): Promise<Res
  * @param repoPath - Repository path (defaults to cwd)
  * @returns Push result
  */
-export async function gitPush(remote?: string, branch?: string, repoPath?: string): Promise<Result<string, Error>> {
+export async function gitPush(remote?: string, branch?: string, repoPath?: string): Promise<Result<PushResult, Error>> {
     try {
         const git = simpleGit(repoPath);
         const result = await git.push(remote, branch);
@@ -307,7 +316,7 @@ export async function gitPush(remote?: string, branch?: string, repoPath?: strin
  * @param repoPath - Repository path (defaults to cwd)
  * @returns Pull result
  */
-export async function gitPull(remote?: string, branch?: string, repoPath?: string): Promise<Result<string, Error>> {
+export async function gitPull(remote?: string, branch?: string, repoPath?: string): Promise<Result<PullResult, Error>> {
     try {
         const git = simpleGit(repoPath);
         const result = await git.pull(remote, branch);
@@ -324,7 +333,7 @@ export async function gitPull(remote?: string, branch?: string, repoPath?: strin
  * @param repoPath - Repository path (defaults to cwd)
  * @returns Fetch result
  */
-export async function gitFetch(remote?: string, branch?: string, repoPath?: string): Promise<Result<string, Error>> {
+export async function gitFetch(remote?: string, branch?: string, repoPath?: string): Promise<Result<FetchResult, Error>> {
     try {
         const git = simpleGit(repoPath);
         if (remote && branch) {

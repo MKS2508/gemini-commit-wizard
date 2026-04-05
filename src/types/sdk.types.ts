@@ -5,6 +5,7 @@
 
 import type { ProviderName } from './provider.types.js';
 import type { ICommitProposal } from './commit.types.js';
+import type { Result } from '@mks2508/no-throw';
 
 /**
  * Options for creating a CommitGenerator instance.

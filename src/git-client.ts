@@ -17,7 +17,18 @@
  * @module git-client
  */
 
-import { simpleGit, SimpleGit, StatusResult, LogResult } from 'simple-git';
+import simpleGit from 'simple-git';
+import type {
+    SimpleGit,
+    StatusResult,
+    LogResult,
+    CommitResult,
+    BranchSingleDeleteResult,
+    MergeResult,
+    PushResult,
+    PullResult,
+    FetchResult,
+} from 'simple-git';
 import { Octokit } from 'octokit';
 import { ok, err, type Result } from '@mks2508/no-throw';
 
@@ -115,7 +126,7 @@ export class GitClient {
      * @param options - Optional commit options
      * @returns Result with commit result or Error
      */
-    async commit(message: string, options?: { author?: string }): Promise<Result<string, Error>> {
+    async commit(message: string, options?: { author?: string }): Promise<Result<CommitResult, Error>> {
         try {
             const result = await this.git.commit(message, [], options);
             return ok(result);
@@ -127,12 +138,12 @@ export class GitClient {
     /**
      * Unstage files.
      * @param files - File paths or array of file paths
-     * @returns Result with command output or Error
+     * @returns Result with void or Error
      */
-    async reset(files: string | string[]): Promise<Result<string, Error>> {
+    async reset(files: string | string[]): Promise<Result<void, Error>> {
         try {
-            const result = await this.git.reset(Array.isArray(files) ? ['--', ...files] : ['--', files]);
-            return ok(result);
+            await this.git.reset(Array.isArray(files) ? ['--', ...files] : ['--', files]);
+            return ok(undefined);
         } catch (e) {
             return err(e as Error);
         }
@@ -141,12 +152,12 @@ export class GitClient {
     /**
      * Discard changes to files.
      * @param files - File paths or array of file paths
-     * @returns Result with command output or Error
+     * @returns Result with void or Error
      */
-    async checkout(files: string | string[]): Promise<Result<string, Error>> {
+    async checkout(files: string | string[]): Promise<Result<void, Error>> {
         try {
-            const result = await this.git.checkout(Array.isArray(files) ? ['--', ...files] : ['--', files]);
-            return ok(result);
+            await this.git.checkout(Array.isArray(files) ? ['--', ...files] : ['--', files]);
+            return ok(undefined);
         } catch (e) {
             return err(e as Error);
         }
@@ -169,16 +180,16 @@ export class GitClient {
      * Create and checkout new branch.
      * @param branchName - Name of the new branch
      * @param startPoint - Starting point for the new branch (optional)
-     * @returns Result with command output or Error
+     * @returns Result with void or Error
      */
-    async checkoutBranch(branchName: string, startPoint?: string): Promise<Result<string, Error>> {
+    async checkoutBranch(branchName: string, startPoint?: string): Promise<Result<void, Error>> {
         try {
             if (startPoint) {
-                const result = await this.git.checkoutBranch(branchName, startPoint);
-                return ok(result);
+                await this.git.checkoutBranch(branchName, startPoint);
+            } else {
+                await this.git.checkoutLocalBranch(branchName);
             }
-            const result = await this.git.checkoutLocalBranch(branchName);
-            return ok(result);
+            return ok(undefined);
         } catch (e) {
             return err(e as Error);
         }
@@ -188,9 +199,9 @@ export class GitClient {
      * Delete a branch.
      * @param branchName - Name of the branch to delete
      * @param force - Force delete even if not merged
-     * @returns Result with command output or Error
+     * @returns Result with branch delete result or Error
      */
-    async deleteBranch(branchName: string, force = false): Promise<Result<string, Error>> {
+    async deleteBranch(branchName: string, force = false): Promise<Result<BranchSingleDeleteResult, Error>> {
         try {
             const result = await this.git.deleteLocalBranch(branchName, force);
             return ok(result);
@@ -204,7 +215,7 @@ export class GitClient {
      * @param branch - Branch name to merge
      * @returns Result with merge result or Error
      */
-    async merge(branch: string): Promise<Result<string, Error>> {
+    async merge(branch: string): Promise<Result<MergeResult, Error>> {
         try {
             const result = await this.git.merge([branch]);
             return ok(result);
@@ -219,7 +230,7 @@ export class GitClient {
      * @param branch - Branch name (optional)
      * @returns Result with push result or Error
      */
-    async push(remote?: string, branch?: string): Promise<Result<string, Error>> {
+    async push(remote?: string, branch?: string): Promise<Result<PushResult, Error>> {
         try {
             const result = await this.git.push(remote, branch);
             return ok(result);
@@ -234,7 +245,7 @@ export class GitClient {
      * @param branch - Branch name (optional)
      * @returns Result with pull result or Error
      */
-    async pull(remote?: string, branch?: string): Promise<Result<string, Error>> {
+    async pull(remote?: string, branch?: string): Promise<Result<PullResult, Error>> {
         try {
             const result = await this.git.pull(remote, branch);
             return ok(result);
@@ -249,7 +260,7 @@ export class GitClient {
      * @param branch - Branch name (optional)
      * @returns Result with fetch result or Error
      */
-    async fetch(remote?: string, branch?: string): Promise<Result<string, Error>> {
+    async fetch(remote?: string, branch?: string): Promise<Result<FetchResult, Error>> {
         try {
             if (remote && branch) {
                 const result = await this.git.fetch(remote, branch);

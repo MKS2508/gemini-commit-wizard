@@ -86,11 +86,17 @@ export function formatCompactBox(content: string, title?: string, caps?: ITermin
     }
 
     // TTY: use subtle box with single border
-    return log.box(content, {
-        title,
-        borderStyle: 'single',
-        padding: 1,
-    });
+    const lines = content.split('\n');
+    const maxLineLength = Math.max(...lines.map(l => l.length));
+    const paddedLines = lines.map(l => `│ ${l.padEnd(maxLineLength)} │`);
+    const titleLine = title ? `├─ ${title} ${'─'.repeat(maxLineLength - title.length + 1)}┤` : '';
+    const topBorder = `┌${'─'.repeat(maxLineLength + 2)}┐`;
+    const bottomBorder = `└${'─'.repeat(maxLineLength + 2)}┘`;
+
+    if (titleLine) {
+        return `${topBorder}\n${titleLine}\n${paddedLines.join('\n')}\n${bottomBorder}`;
+    }
+    return `${topBorder}\n${paddedLines.join('\n')}\n${bottomBorder}`;
 }
 
 /**
