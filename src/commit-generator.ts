@@ -523,6 +523,7 @@ export class CommitGenerator {
             stageSpinner.fail('Failed to stage changes');
             return stageResult as any;
         }
+        stageSpinner.succeed('Changes staged');
 
         const repoSpinner = log.spinner('Analyzing repository...');
         repoSpinner.start();

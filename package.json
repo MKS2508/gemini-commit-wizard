@@ -1,6 +1,6 @@
 {
   "name": "gemini-commit-wizard",
-  "version": "1.2.5",
+  "version": "1.2.8",
   "description": "AI-powered Git commit generation with multi-provider support (Gemini, Groq, OpenRouter)",
   "main": "src/commit-generator.ts",
   "type": "module",
@@ -57,7 +57,7 @@
     "@anthropic-ai/claude-code": "^2.1.87",
     "@google/genai": "^1.47.0",
     "@inquirer/prompts": "^8.3.2",
-    "@mks2508/better-logger": "^5.0.0",
+    "@mks2508/better-logger": "^5.0.2",
     "@mks2508/no-throw": "^0.1.0",
     "@openrouter/sdk": "^0.10.2",
     "groq-sdk": "^1.1.2",
