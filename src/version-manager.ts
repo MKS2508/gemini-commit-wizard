@@ -9,7 +9,9 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { Logger } from '@mks2508/better-logger';
+import logger from '@mks2508/better-logger';
+// Alias so the file's existing `log.xxx(...)` call sites stay unchanged.
+const log = logger;
 import { ok, err, isErr, tryCatchAsync, type Result, type ResultError } from '@mks2508/no-throw';
 import type {
     IChangelogEntry,
@@ -19,7 +21,6 @@ import type {
     VersionErrorCode,
 } from './types/index.js';
 
-const log = new Logger();
 
 /**
  * Manages semantic versioning by analyzing git commits,

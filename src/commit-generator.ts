@@ -11,7 +11,9 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
-import { Logger } from '@mks2508/better-logger';
+import logger from '@mks2508/better-logger';
+// Alias so the file's existing `log.xxx(...)` call sites stay unchanged.
+const log = logger;
 import { ok, err, isErr, tryCatchAsync, type Result, type ResultError } from '@mks2508/no-throw';
 import { createCommitPrompt, GeminiResponseParser, type GeminiPromptConfig } from './prompt-templates';
 import { createProvider, listProviders } from './providers/index.js';
@@ -24,6 +26,13 @@ import {
     type IStagingDecision,
     type StagingMode,
 } from './staging.js';
+import {
+    buildJsonEnvelope,
+    writeJson,
+    mapErrorToExitCode,
+    ExitCode,
+    type JsonEnvelope,
+} from './reporter.js';
 import type {
     IAIProvider,
     IProjectConfig,
@@ -36,7 +45,12 @@ import type {
     CommitErrorCode,
 } from './types/index.js';
 
-const log = new Logger();
+/**
+ * Wizard version. Bumped on every release.
+ * Keep in sync with `package.json` so `--version` reports the truth.
+ */
+export const WIZARD_VERSION = '2.1.0';
+
 
 /**
  * Parses CLI arguments into ICommitGeneratorOptions.
@@ -78,6 +92,25 @@ function parseCliArgs(argv: string[]): ICommitGeneratorOptions {
     const isAgent = args.includes('--agent') || args.includes('--ci');
     const noInteractive = args.includes('--no-interactive');
 
+    // Resolve context: --context-file wins, then --context, then env.
+    // --context-file is preferred for agents passing large prompts
+    // because it sidesteps shell-escape pain.
+    const contextFile = get('--context-file');
+    let contextValue = get('--context') || process.env.COMMIT_WIZARD_CONTEXT;
+    if (contextFile) {
+        try {
+            contextValue = readFileSync(contextFile, 'utf-8');
+        } catch (e) {
+            // Defer the error to the constructor / main entry so we can
+            // surface it through the JSON envelope instead of crashing
+            // here. The flag is captured but the file read failed.
+            contextValue = undefined;
+        }
+    }
+
+    // --no-color or NO_COLOR env (https://no-color.org) disables ANSI.
+    const noColor = args.includes('--no-color') || !!process.env.NO_COLOR;
+
     return {
         provider: (get('--provider') || process.env.COMMIT_WIZARD_PROVIDER) as any,
         model: get('--model'),
@@ -90,11 +123,22 @@ function parseCliArgs(argv: string[]): ICommitGeneratorOptions {
         addFiles,
         isAgent: isAgent || noInteractive,
         exhaustive: args.includes('--exhaustive') || args.includes('-exhaustive'),
-        context: get('--context'),
+        context: contextValue,
+        contextFile: contextFile || undefined,
         workType: get('--work-type'),
         affectedComponents: get('--affected-components'),
+        // v2.1: --dry-run now actually does what it says (skips
+        // executeCommit + push). Earlier it was a parsed-but-unused flag.
         dryRun: args.includes('--dry-run'),
+        // v2.1: --json is now functional end-to-end. Suppresses human
+        // output and writes a structured envelope to stdout.
         json: args.includes('--json'),
+        // v2.1: --atomic validates every proposal before committing any.
+        // Default behavior (commit-as-you-go, stop on first failure)
+        // is preserved.
+        atomic: args.includes('--atomic'),
+        // v2.1: --no-color disables ANSI. Also honors NO_COLOR env.
+        noColor,
         verbose: args.includes('--verbose') || args.includes('-v'),
         quiet: args.includes('--quiet') || args.includes('-q'),
         silent: args.includes('--silent'),
@@ -132,13 +176,27 @@ export class CommitGenerator {
         this.tempDir = join(this.projectRoot, '.temp');
         this.caps = detectTerminalCapabilities();
 
-        // Configure logger level based on options (v5 setCLILevel)
-        if (options.silent) {
-            log.setCLILevel('silent');
+        // Configure logger level based on options (v5→v0.18 setVerbosity).
+        // MUST happen BEFORE any module that logs (loadProjectConfig,
+        // provider constructor, etc.) so --json / --silent suppresses
+        // everything from the very first line.
+        if (options.silent || options.json) {
+            log.setVerbosity('silent');
         } else if (options.quiet) {
-            log.setCLILevel('quiet');
+            log.setVerbosity('quiet');
         } else if (options.verbose) {
-            log.setCLILevel('debug');
+            log.setVerbosity('debug');
+        }
+
+        // v2.1: --no-color / NO_COLOR → strip ANSI sequences from output.
+        // better-logger respects this via setNoColor when available;
+        // for now we use the env var which the library reads.
+        if (options.noColor) {
+            process.env.NO_COLOR = '1';
+            // Force TERM=dumb so well-behaved libs drop color too.
+            if (process.env.TERM && process.env.TERM !== 'dumb') {
+                process.env.FORCE_COLOR = '0';
+            }
         }
 
         this.projectConfig = loadProjectConfig(this.projectRoot);
@@ -479,49 +537,29 @@ export class CommitGenerator {
     }
 
     /**
-     * Execute a single commit.
+     * Validate that a proposal can be committed without side effects.
      *
-     * v2.0: NO longer falls back to staging `allFiles` when `proposal.files`
-     * is missing. This was the footgun that re-staged unrelated untracked
-     * files during multi-commit splits. The proposal must declare its
-     * target files; if it does not, the commit fails cleanly with
-     * `MISSING_PROPOSAL_FILES` so the caller knows the AI response was
-     * malformed and can retry.
+     * v2.1: split out of `executeCommit` so `--atomic` can validate
+     * every proposal before committing any. Returns the list of files
+     * that would be staged (for transparency), or throws with the same
+     * `MISSING_PROPOSAL_FILES` / `FILE_NOT_IN_INDEX` semantics as
+     * before.
      *
-     * Also writes the commit message to a temp file and uses
-     * `git commit -F <file>` instead of `-m <string>` to avoid shell
-     * escaping bugs when the message contains quotes, backticks, or
-     * newlines that conflict with shell parsing (see F22).
-     *
-     * @param proposal - The commit proposal to execute
-     * @returns Result indicating success or COMMIT_EXEC_ERROR
+     * @param proposal - The commit proposal to validate
+     * @returns Resolves with the validated file list
      */
-    private async executeCommit(
+    private async validateProposal(
         proposal: ICommitProposal,
-    ): Promise<Result<boolean, ResultError<'COMMIT_EXEC_ERROR'>>> {
+    ): Promise<Result<string[], ResultError<'COMMIT_EXEC_ERROR'>>> {
         return tryCatchAsync(async () => {
-            // F4: require explicit file list. No fallback to allFiles.
-            //
-            // NOTE: tryCatchAsync from @mks2508/no-throw only catches
-            // thrown errors, NOT returned err(...) values. To surface
-            // an error from inside this callback, we MUST throw — a
-            // bare `return err(...)` would be silently wrapped in `ok()`
-            // and the spinner would falsely report success.
             if (!proposal.files || proposal.files.length === 0) {
                 const titlePreview = proposal.title.split('\n')[0];
-                log.warn(
-                    `Proposal "${titlePreview}" has no files declared. ` +
-                    'Skipping. (AI response must include ### Archivos de la Propuesta #N.)',
-                );
                 throw new Error(
                     `MISSING_PROPOSAL_FILES: proposal "${titlePreview}" did not declare target files`,
                 );
             }
 
-            const targetFiles = proposal.files;
-
-            // Validate every declared file is actually tracked / staged
-            for (const file of targetFiles) {
+            for (const file of proposal.files) {
                 const stagedResult = await this.gitCommand([
                     'ls-files', '--error-unmatch', '--', file,
                 ]);
@@ -533,7 +571,32 @@ export class CommitGenerator {
                 }
             }
 
-            // Stage each declared file explicitly (no blanket add)
+            return proposal.files;
+        }, 'COMMIT_EXEC_ERROR');
+    }
+
+    /**
+     * Stage the proposal's files and create the commit.
+     *
+     * Runs `validateProposal` first as a safety net so the F4 guard
+     * (refuse to commit proposals without a declared file list) holds
+     * even when this method is called directly without prior validation
+     * — which is the case in `generate()`'s default (non-atomic) loop.
+     * Writes the commit message to a temp file and uses
+     * `git commit -F <file>` (see F22) to dodge shell-escape bugs.
+     *
+     * @param proposal - The commit proposal to apply
+     * @returns Result indicating success or COMMIT_EXEC_ERROR
+     */
+    private async applyProposal(
+        proposal: ICommitProposal,
+    ): Promise<Result<boolean, ResultError<'COMMIT_EXEC_ERROR'>>> {
+        const validated = await this.validateProposal(proposal);
+        if (isErr(validated)) return validated;
+
+        return tryCatchAsync(async () => {
+            const targetFiles = proposal.files;
+
             for (const file of targetFiles) {
                 const addResult = await this.gitCommand(['add', '--', file]);
                 if (isErr(addResult)) {
@@ -561,7 +624,6 @@ export class CommitGenerator {
                 const commitResult = await this.gitCommand(['commit', '-F', messagePath]);
                 if (isErr(commitResult)) throw new Error(commitResult.error.message);
             } finally {
-                // Clean up the temp message file
                 try {
                     const { unlinkSync } = await import('fs');
                     unlinkSync(messagePath);
@@ -572,6 +634,23 @@ export class CommitGenerator {
 
             return true;
         }, 'COMMIT_EXEC_ERROR');
+    }
+
+    /**
+     * Backwards-compatible wrapper kept for tests + SDK consumers.
+     *
+     * v2.1: prefer `validateProposal` + `applyProposal` so callers can
+     * decide whether to do atomic validation up front.
+     *
+     * @param proposal - The commit proposal to execute
+     * @returns Result indicating success or COMMIT_EXEC_ERROR
+     */
+    private async executeCommit(
+        proposal: ICommitProposal,
+    ): Promise<Result<boolean, ResultError<'COMMIT_EXEC_ERROR'>>> {
+        const validated = await this.validateProposal(proposal);
+        if (isErr(validated)) return validated;
+        return this.applyProposal(proposal);
     }
 
     /**
@@ -853,22 +932,52 @@ export class CommitGenerator {
             }
         }
 
-        // Step 4: Execute commits (if auto-approve)
+        // Step 4: Execute commits (if auto-approve AND not dry-run)
         let commitCount = 0;
         let pushed = false;
 
-        if (this.options.autoApprove) {
+        if (this.options.dryRun) {
+            // v2.1: dry-run is now a real skip. We still show the proposals
+            // (already rendered above) and report them as "would apply"
+            // so agents get a parseable preview without side effects.
+            log.info(`Dry run: ${proposals.length} proposal(s) parsed, no commits applied.`);
+        } else if (this.options.autoApprove) {
             const isValid = await this.validateAutoApprove();
             if (!isValid) {
                 return err({ type: 'GIT_ERROR', message: 'Auto-approve validation failed' } as any);
             }
 
+            // v2.1: --atomic validates every proposal up front. If any
+            // would fail, abort with ZERO commits applied. Without
+            // --atomic the legacy behavior is preserved: commit as you
+            // go, stop on first failure.
+            if (this.options.atomic && proposals.length > 1) {
+                for (let i = 0; i < proposals.length; i++) {
+                    const v = await this.validateProposal(proposals[i]);
+                    if (isErr(v)) {
+                        log.error(
+                            `Atomic validation failed at proposal ${i + 1}/${proposals.length}: ` +
+                            v.error.message,
+                        );
+                        return err({
+                            type: 'COMMIT_EXEC_ERROR',
+                            message: `Atomic validation failed: ${v.error.message}`,
+                        } as any);
+                    }
+                }
+                log.info(`Atomic validation: ${proposals.length} proposal(s) cleared.`);
+            }
+
             for (let i = 0; i < proposals.length; i++) {
                 const commitSpinner = log.spinner(`Commit ${i + 1}/${proposals.length}...`);
                 commitSpinner.start();
-                const commitResult = await this.executeCommit(proposals[i]);
+                const commitResult = await this.applyProposal(proposals[i]);
                 if (isErr(commitResult) || !commitResult.value) {
                     commitSpinner.fail('Commit failed');
+                    // v2.1: stop on first failure (existing behavior).
+                    // Atomic mode wouldn't reach here because validation
+                    // already passed for every proposal.
+                    break;
                 } else {
                     commitSpinner.succeed(proposals[i].title.split('\n')[0].substring(0, 50));
                     commitCount++;
@@ -912,6 +1021,13 @@ export class CommitGenerator {
 if (import.meta.main) {
     const args = process.argv.slice(2);
 
+    // v2.1: --version / -V early-exit. Writes to stdout (not stderr)
+    // because agents that probe `--version` want to capture it cleanly.
+    if (args.includes('--version') || args.includes('-V')) {
+        process.stdout.write(`gemini-commit-wizard v${WIZARD_VERSION}\n`);
+        process.exit(ExitCode.SUCCESS);
+    }
+
     if (args.includes('--help') || args.includes('-h')) {
         log.header('Commit Wizard', 'AI-powered commit generation');
         log.blank();
@@ -923,18 +1039,39 @@ if (import.meta.main) {
         log.info('  --auto-approve               Execute commits automatically');
         log.info('  --no-push                    Skip git push');
         log.info('  --context <description>      Describe your changes');
+        log.info('  --context-file <path>        Read context from a file');
         log.info('  --work-type <type>           feature|bugfix|refactor|docs|test');
         log.info('  --affected-components <list>  Components changed');
         log.info('  --exhaustive                 Deep analysis mode');
-        log.info('  --dry-run                    Show proposals without executing');
-        log.info('  --json                       Output as JSON (implies dry-run)');
+        log.info('  --dry-run                    Show proposals without executing commits or push');
+        log.info('  --json                       Machine-readable JSON on stdout (suppresses human output)');
+        log.info('  --atomic                     Validate ALL proposals before any commit');
+        log.info('  --no-color                   Disable ANSI color output (honors NO_COLOR env)');
         log.info('  --verbose, -v                Show debug output');
         log.info('  --quiet, -q                  Only show errors and results');
         log.info('  --silent                     No output (SDK mode)');
         log.info('  --list-providers             Show available providers');
+        log.info('  --version, -V                Print version and exit');
         log.info('  --help, -h                   Show this help');
         log.blank();
-        process.exit(0);
+        log.info('Staging modes (mutually exclusive):');
+        log.info('  --staged-only                Only use files already in the index');
+        log.info('  --all                        Stage every modified + untracked file');
+        log.info('  --add <files...>             Stage only the comma-separated paths');
+        log.info('  --agent / --ci / --no-interactive  Non-interactive mode; requires explicit staging');
+        log.blank();
+        log.info('Exit codes:');
+        log.info('  0  success');
+        log.info('  1  unspecified error');
+        log.info('  2  no changes to process');
+        log.info('  3  AI provider error');
+        log.info('  4  parse error (AI response malformed)');
+        log.info('  5  commit execution error');
+        log.info('  6  push cancelled / git error during push');
+        log.info('  7  validation failed (auto-approve refused)');
+        log.info('  8  staging error');
+        log.blank();
+        process.exit(ExitCode.SUCCESS);
     }
 
     if (args.includes('--list-providers')) {
@@ -958,15 +1095,23 @@ if (import.meta.main) {
             }
         }
         log.blank();
-        process.exit(0);
+        process.exit(ExitCode.SUCCESS);
     }
 
     const options = parseCliArgs(process.argv);
     const generator = new CommitGenerator(options);
     const result = await generator.generate();
 
-    if (isErr(result)) {
+    // v2.1: when --json is set, write a structured envelope to stdout.
+    // All human output is already suppressed via setVerbosity('silent').
+    if (options.json) {
+        const envelope = buildJsonEnvelope(result, options.dryRun ?? false);
+        writeJson(envelope);
+    } else if (isErr(result)) {
         log.error(result.error.message);
-        process.exit(1);
     }
+
+    // v2.1: map the domain error to a distinct exit code so agents
+    // can branch on "no changes" vs "AI failed" vs "push cancelled".
+    process.exit(isErr(result) ? mapErrorToExitCode(result.error) : ExitCode.SUCCESS);
 }

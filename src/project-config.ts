@@ -13,10 +13,11 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { Logger } from '@mks2508/better-logger';
+import logger from '@mks2508/better-logger';
+// Alias so the file's existing `log.xxx(...)` call sites stay unchanged.
+const log = logger;
 import type { IProjectConfig } from './types/index.js';
 
-const log = new Logger();
 
 /**
  * Load project configuration from the project root.

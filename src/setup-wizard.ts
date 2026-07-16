@@ -18,12 +18,13 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, basename } from 'path';
-import { Logger } from '@mks2508/better-logger';
+import logger from '@mks2508/better-logger';
+// Alias so the file's existing `log.xxx(...)` call sites stay unchanged.
+const log = logger;
 import { tryCatchAsync, type Result } from '@mks2508/no-throw';
 import { loadProjectConfig, detectTechStack, detectPlatform } from './project-config.js';
 import type { IProjectConfig, IProjectComponent } from './types/index.js';
 
-const log = new Logger();
 
 /**
  * Result type for the setup wizard.

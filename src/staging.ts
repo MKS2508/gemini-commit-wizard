@@ -22,10 +22,11 @@
 
 import { existsSync } from 'fs';
 import { spawnSync } from 'child_process';
-import { Logger } from '@mks2508/better-logger';
+import logger from '@mks2508/better-logger';
+// Alias so the file's existing `log.xxx(...)` call sites stay unchanged.
+const log = logger;
 import type { IGitFileStatus } from './types/git.types.js';
 
-const log = new Logger();
 
 /**
  * Staging strategy selected for a commit run.

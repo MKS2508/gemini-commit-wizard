@@ -8,7 +8,7 @@
         "@anthropic-ai/claude-code": "^2.1.87",
         "@google/genai": "^1.47.0",
         "@inquirer/prompts": "^8.3.2",
-        "@mks2508/better-logger": "^5.0.2",
+        "@mks2508/better-logger": "0.18.2-alpha.1",
         "@mks2508/no-throw": "^0.1.0",
         "@openrouter/sdk": "^0.10.2",
         "groq-sdk": "^1.1.2",
@@ -148,7 +148,7 @@
 
     "@kwsites/promise-deferred": ["@kwsites/promise-deferred@1.1.1", "", {}, "sha512-GaHYm+c0O9MjZRu0ongGBRbinu8gVAMd2UZjji6jVmqKtZluZnptXGWhz1E8j8D2HJ3f/yMxKAUC0b+57wncIw=="],
 
-    "@mks2508/better-logger": ["@mks2508/better-logger@5.0.2", "", { "dependencies": { "chalk": "^5.6.2" } }, "sha512-SuLwf+vjf5LkTlhYgmAuwazWO5en/Byh6CeclfRUwHn9dhHW4bAHxMz3UKEHj618voo/Nr8t730y//tbd8jEKg=="],
+    "@mks2508/better-logger": ["@mks2508/better-logger@0.18.2-alpha.1", "", {}, "sha512-3Hnl1vfcsbMk4AR49wC12vWBbRvzIfIQ33qBOuCSQH2mJ+puiU+Jdw8AuilLPcCeF2YTzOii276nmNeKxHwtkQ=="],
 
     "@mks2508/no-throw": ["@mks2508/no-throw@0.1.0", "", {}, "sha512-/CI8FqiO3oLw66XIQ07mw13b6PDNh1vit0cGzUBLq5MfJUTKDU0yaKFE0l9CqSpe6xv4n4+z4RWEytP5xePKZQ=="],
 
@@ -351,8 +351,6 @@
     "cac": ["cac@6.7.14", "", {}, "sha512-b6Ilus+c3RrdDk+JhLKUAQfzzgLEPy6wcXqS7f/xe1EETvsDP6GORG7SFuOs6cID5YkqchW/LXZbX5bc8j7ZcQ=="],
 
     "chai": ["chai@5.3.3", "", { "dependencies": { "assertion-error": "^2.0.1", "check-error": "^2.1.1", "deep-eql": "^5.0.1", "loupe": "^3.1.0", "pathval": "^2.0.0" } }, "sha512-4zNhdJD/iOjSH0A05ea+Ke6MU5mmpQcbQsSOkgdaUMJ9zTlDTD/GYlwohmIE2u0gaxHYiVHEn1Fw9mZ/ktJWgw=="],
-
-    "chalk": ["chalk@5.6.2", "", {}, "sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA=="],
 
     "chardet": ["chardet@2.1.1", "", {}, "sha512-PsezH1rqdV9VvyNhxxOW32/d75r01NY7TQCmOqomRo15ZSOKbpTFVsfjghxo6JloQUCGnH4k1LGu0R4yCLlWQQ=="],
 

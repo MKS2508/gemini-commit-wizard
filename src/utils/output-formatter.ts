@@ -4,11 +4,12 @@
  * @module utils/output-formatter
  */
 
-import { Logger, stylePresets } from '@mks2508/better-logger';
+import logger, { stylePresets } from '@mks2508/better-logger';
+// Alias so the file's existing `log.xxx(...)` call sites stay unchanged.
+const log = logger;
 import { detectTerminalCapabilities } from './environment.js';
 import type { ITerminalCapabilities } from './environment.js';
 
-const log = new Logger();
 
 /**
  * Badge type for semantic styling.

@@ -64,8 +64,31 @@ export interface ICommitGeneratorOptions {
     affectedComponents?: string;
     /** Analyze and show proposals without executing commits */
     dryRun?: boolean;
-    /** Output proposals as JSON (implies dry-run) */
+    /**
+     * Output machine-readable JSON to stdout and suppress human output.
+     * Works with or without `--dry-run`. JSON shape:
+     *   { ok: true, dryRun, proposals, commitCount, pushed, providerName, modelName, elapsedMs }
+     *   { ok: false, error: { type, message } }
+     */
     json?: boolean;
+    /**
+     * Atomic mode: validate every proposal BEFORE executing any commit.
+     * If any proposal would fail (missing files, file not in index, etc.)
+     * the run aborts cleanly with zero commits applied. Without this flag
+     * the wizard commits each proposal in order and stops on the first
+     * failure, leaving partial work in the index.
+     */
+    atomic?: boolean;
+    /**
+     * Read additional context from a file path instead of `--context`.
+     * Useful for agents passing large prompts without shell-escape pain.
+     */
+    contextFile?: string;
+    /**
+     * Force-disable ANSI color output. Also honors the `NO_COLOR`
+     * environment variable (https://no-color.org) by default.
+     */
+    noColor?: boolean;
     /** Show debug-level output */
     verbose?: boolean;
     /** Only show errors and final result */

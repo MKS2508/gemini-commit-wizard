@@ -10,14 +10,15 @@
 
 import { execSync } from 'child_process';
 import { platform } from 'os';
-import { Logger } from '@mks2508/better-logger';
+import logger from '@mks2508/better-logger';
+// Alias so the file's existing `log.xxx(...)` call sites stay unchanged.
+const log = logger;
 import { isErr } from '@mks2508/no-throw';
 import { CommitGenerator } from './commit-generator';
 import { loadProjectConfig } from './project-config';
 import { detectTerminalCapabilities, shouldUseFancyOutput } from './utils/index.js';
 import type { ICommitOptions, ICommitGeneratorOptions } from './types/index.js';
 
-const log = new Logger();
 
 /**
  * Interactive commit UI that collects user input via native dialogs
