@@ -133,9 +133,19 @@ ${includeChangelog ? `
 </changelog>` : ''}
 \`\`\`
 
+### **Archivos de la Propuesta #1** (OBLIGATORIO)
+
+Lista de paths EXACTOS a incluir en este commit (relativos al project root).
+Cada commit DEBE declarar sus archivos — sin esto el commit será rechazado.
+
+\`\`\`files
+src/commit-generator.ts
+tests/staging.test.ts
+\`\`\`
+
 ### **Propuesta de Commit #2** (solo si es necesario)
 
-[Repetir formato anterior]
+[Repetir formato anterior + sección "Archivos de la Propuesta #2" con su propia lista]
 
 ---
 
@@ -269,12 +279,14 @@ export class GeminiResponseParser {
         description: string;
         technical: string;
         changelog: string;
+        files: string[];
     }> {
         const proposals: Array<{
             title: string;
             description: string;
             technical: string;
             changelog: string;
+            files: string[];
         }> = [];
 
         const proposalPattern = /###\s*\*\*Propuesta de Commit #\d+\*\*/g;
@@ -300,7 +312,64 @@ export class GeminiResponseParser {
             }
         }
 
+        // After extracting the commit bodies, look for the `### Archivos
+        // de la Propuesta #N` sections and attach the file list to the
+        // matching proposal. If absent, the proposal keeps `files: []`
+        // and executeCommit will refuse to apply it (F4: MISSING_PROPOSAL_FILES).
+        const fileSectionPattern = /###\s*\*\*Archivos de la Propuesta #(\d+)\*\*/g;
+        const fileMatches = Array.from(response.matchAll(fileSectionPattern));
+        for (const fm of fileMatches) {
+            const index = parseInt(fm[1], 10) - 1;
+            const target = proposals[index];
+            if (!target) continue;
+            const sectionStart = fm.index!;
+            const nextSectionMatch = response
+                .substring(sectionStart + 1)
+                .match(/###\s*\*\*(?:Propuesta de Commit|Archivos de la Propuesta|Decision)/);
+            const sectionEnd = nextSectionMatch
+                ? sectionStart + 1 + nextSectionMatch.index!
+                : response.length;
+            const section = response.substring(sectionStart, sectionEnd);
+            target.files = this.extractFilesList(section);
+        }
+
         return proposals;
+    }
+
+    /**
+     * Extract file paths from an "Archivos de la Propuesta" section.
+     *
+     * Accepts two shapes:
+     * - Fenced block: ```files\npath1\npath2\n```
+     * - Plain list: lines starting with `- path` after a header
+     *
+     * @param section - The raw section text
+     * @returns Deduplicated list of file paths
+     */
+    private static extractFilesList(section: string): string[] {
+        const out: string[] = [];
+
+        // Try fenced block first
+        const fenceMatch = section.match(/```(?:files)?\s*\n([\s\S]*?)\n```/);
+        if (fenceMatch) {
+            for (const raw of fenceMatch[1].split('\n')) {
+                const trimmed = raw.trim();
+                if (!trimmed || trimmed.startsWith('#')) continue;
+                // Strip leading list markers (`-`, `*`)
+                const cleaned = trimmed.replace(/^[-*]\s+/, '');
+                if (cleaned) out.push(cleaned);
+            }
+            return [...new Set(out)];
+        }
+
+        // Fallback: plain list
+        for (const raw of section.split('\n')) {
+            const trimmed = raw.trim();
+            if (!trimmed) continue;
+            const m = trimmed.match(/^[-*]\s+(.+)$/);
+            if (m) out.push(m[1].trim());
+        }
+        return [...new Set(out)];
     }
 
     /**
@@ -333,6 +402,7 @@ export class GeminiResponseParser {
         description: string;
         technical: string;
         changelog: string;
+        files: string[];
     } | null {
         const lines = content.split('\n');
 
@@ -384,6 +454,7 @@ export class GeminiResponseParser {
             description: description.trim(),
             technical: technical.trim(),
             changelog: changelog.trim(),
+            files: [],
         };
     }
 

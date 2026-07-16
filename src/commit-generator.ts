@@ -8,14 +8,22 @@
  * @module commit-generator
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { spawnSync } from 'child_process';
 import { Logger } from '@mks2508/better-logger';
 import { ok, err, isErr, tryCatchAsync, type Result, type ResultError } from '@mks2508/no-throw';
 import { createCommitPrompt, GeminiResponseParser, type GeminiPromptConfig } from './prompt-templates';
 import { createProvider, listProviders } from './providers/index.js';
 import { loadProjectConfig } from './project-config';
 import { detectTerminalCapabilities, formatProviderBadge, shouldUseFancyOutput, type ITerminalCapabilities } from './utils/index.js';
+import {
+    decideStaging,
+    applyStaging,
+    getGitStatusDetailed,
+    type IStagingDecision,
+    type StagingMode,
+} from './staging.js';
 import type {
     IAIProvider,
     IProjectConfig,
@@ -32,6 +40,16 @@ const log = new Logger();
 
 /**
  * Parses CLI arguments into ICommitGeneratorOptions.
+ *
+ * Recognized flags (added in v2.0):
+ *   --staged-only             stage mode: respect user's pre-existing staging
+ *   --all                     stage mode: git add -A (explicit)
+ *   --add <files...>          stage mode: stage specific paths (comma-separated)
+ *   --agent                   skip all prompts, error on ambiguity (CI/agent-safe)
+ *   --ci                      alias for --agent
+ *   --no-interactive          disable prompts, same as --agent
+ *   --confirm-push            opt back into push with explicit confirmation
+ *
  * @param argv - Raw process.argv (including first two entries)
  * @returns Parsed options object
  */
@@ -42,11 +60,35 @@ function parseCliArgs(argv: string[]): ICommitGeneratorOptions {
         return idx > -1 && args[idx + 1] ? args[idx + 1] : undefined;
     };
 
+    // Resolve staging mode from mutually-exclusive flags
+    let stagingMode: StagingMode | undefined;
+    let addFiles: string[] | undefined;
+    if (args.includes('--staged-only')) {
+        stagingMode = 'staged-only';
+    } else if (args.includes('--all')) {
+        stagingMode = 'all';
+    } else if (args.includes('--add')) {
+        stagingMode = 'specific';
+        const raw = get('--add');
+        if (raw) {
+            addFiles = raw.split(',').map(f => f.trim()).filter(Boolean);
+        }
+    }
+
+    const isAgent = args.includes('--agent') || args.includes('--ci');
+    const noInteractive = args.includes('--no-interactive');
+
     return {
         provider: (get('--provider') || process.env.COMMIT_WIZARD_PROVIDER) as any,
         model: get('--model'),
-        autoApprove: args.includes('--auto-approve'),
-        noPush: args.includes('--no-push'),
+        // v2.0: autoApprove defaults to FALSE. --auto-approve still works but
+        // is now paired with --confirm-push for actual execution.
+        autoApprove: args.includes('--auto-approve') || args.includes('--yes') || args.includes('-y'),
+        // v2.0: noPush defaults to TRUE (push is opt-in via --confirm-push).
+        noPush: !args.includes('--confirm-push') && !args.includes('--push'),
+        stagingMode,
+        addFiles,
+        isAgent: isAgent || noInteractive,
         exhaustive: args.includes('--exhaustive') || args.includes('-exhaustive'),
         context: get('--context'),
         workType: get('--work-type'),
@@ -131,7 +173,7 @@ export class CommitGenerator {
 
     private ensureTempDir(): void {
         if (!existsSync(this.tempDir)) {
-            Bun.spawnSync(['mkdir', '-p', this.tempDir]);
+            mkdirSync(this.tempDir, { recursive: true });
         }
     }
 
@@ -142,27 +184,56 @@ export class CommitGenerator {
      */
     private async gitCommand(args: string[]): Promise<Result<string, ResultError<'GIT_ERROR'>>> {
         return tryCatchAsync(async () => {
-            const result = Bun.spawnSync(['git', ...args], {
+            const result = spawnSync('git', args, {
                 cwd: this.projectRoot,
-                stdout: 'pipe',
-                stderr: 'pipe',
+                encoding: 'utf-8',
+                stdio: ['ignore', 'pipe', 'pipe'],
             });
-            if (result.exitCode !== 0) {
-                const stderr = result.stderr?.toString() || 'Git command failed';
+            if (result.status !== 0) {
+                const stderr = result.stderr || 'Git command failed';
                 throw new Error(`Git error: ${stderr}`);
             }
-            return result.stdout?.toString().trim() || '';
+            let out = result.stdout || '';
+            if (out.endsWith('\n')) out = out.slice(0, -1);
+            return out;
         }, 'GIT_ERROR');
     }
 
     /**
-     * Stage all changes.
-     * @returns Result indicating success or STAGING_ERROR
+     * Resolve and apply the staging decision for this run.
+     *
+     * Replaces the previous blanket `git add -A`. Uses the staging module to
+     * honour explicit `--staged-only`, `--all`, `--add <files>`, or
+     * `--agent` flags. In agent/CI mode without an explicit mode, this
+     * errors out cleanly instead of guessing.
+     *
+     * @returns Result with the staging decision or STAGING_ERROR
      */
-    private async stageAllChanges(): Promise<Result<void, ResultError<'STAGING_ERROR'>>> {
-        const result = await this.gitCommand(['add', '-A']);
-        if (isErr(result)) return err({ type: 'STAGING_ERROR', message: result.error.message } as any);
-        return ok(undefined);
+    private async resolveAndApplyStaging(): Promise<Result<IStagingDecision, ResultError<'STAGING_ERROR'>>> {
+        return tryCatchAsync(async () => {
+            const isInteractive = !this.options.isAgent && this.caps.isTTY;
+            const decision = await decideStaging(this.projectRoot, {
+                mode: this.options.stagingMode,
+                files: this.options.addFiles,
+                interactive: isInteractive,
+                isAgent: this.options.isAgent,
+            });
+
+            await applyStaging(this.projectRoot, decision);
+
+            log.info(`Staging: ${decision.reason}`);
+            if (decision.toStage.length > 0) {
+                log.debug(`  +${decision.toStage.length} file(s) added`);
+            }
+            if (decision.alreadyStaged.length > 0) {
+                log.debug(`  ${decision.alreadyStaged.length} file(s) already staged`);
+            }
+            if (decision.excluded.length > 0) {
+                log.debug(`  ${decision.excluded.length} file(s) excluded from this run`);
+            }
+
+            return decision;
+        }, 'STAGING_ERROR');
     }
 
     /**
@@ -243,12 +314,14 @@ export class CommitGenerator {
 
     /**
      * Build the full analysis context for the AI prompt.
+     *
+     * Does NOT stage anything — `analyze()` is a pure read-only path for
+     * SDK consumers that want proposals without side effects. Staging is
+     * only applied by `generate()`, the full execution flow.
+     *
      * @returns Result with commit analysis or error
      */
     private async generateAnalysisContext(): Promise<Result<ICommitAnalysis, ResultError<CommitErrorCode>>> {
-        const stageResult = await this.stageAllChanges();
-        if (isErr(stageResult)) return stageResult as any;
-
         const filesResult = await this.getRepositoryStatus();
         if (isErr(filesResult)) return filesResult as any;
         const files = filesResult.value;
@@ -382,8 +455,17 @@ export class CommitGenerator {
 
     /**
      * Parse AI response into commit proposals.
+     *
+     * v2.0: forwards `files` from the parser output. Earlier this method
+     * dropped the parsed `files` array and re-set it to `[]`, which made
+     * every proposal look file-less and triggered the
+     * `MISSING_PROPOSAL_FILES` guard in `executeCommit`, even when the
+     * AI response had emitted a correct `### Archivos de la Propuesta
+     * #N` section. That was the bug behind `✗ Commit failed` with
+     * 0 commits applied despite a perfectly parseable response.
+     *
      * @param aiResponse - Raw AI response text
-     * @returns Array of parsed commit proposals
+     * @returns Array of parsed commit proposals with files preserved
      */
     private parseCommitProposals(aiResponse: string): ICommitProposal[] {
         const parsed = GeminiResponseParser.parseCommitProposals(aiResponse);
@@ -392,29 +474,68 @@ export class CommitGenerator {
             description: p.description,
             technical: p.technical,
             changelog: p.changelog,
-            files: [],
+            files: p.files ?? [],
         }));
     }
 
     /**
      * Execute a single commit.
+     *
+     * v2.0: NO longer falls back to staging `allFiles` when `proposal.files`
+     * is missing. This was the footgun that re-staged unrelated untracked
+     * files during multi-commit splits. The proposal must declare its
+     * target files; if it does not, the commit fails cleanly with
+     * `MISSING_PROPOSAL_FILES` so the caller knows the AI response was
+     * malformed and can retry.
+     *
+     * Also writes the commit message to a temp file and uses
+     * `git commit -F <file>` instead of `-m <string>` to avoid shell
+     * escaping bugs when the message contains quotes, backticks, or
+     * newlines that conflict with shell parsing (see F22).
+     *
      * @param proposal - The commit proposal to execute
-     * @param allFiles - All changed files (used when proposal has no specific files)
      * @returns Result indicating success or COMMIT_EXEC_ERROR
      */
     private async executeCommit(
         proposal: ICommitProposal,
-        allFiles: IFileChange[],
     ): Promise<Result<boolean, ResultError<'COMMIT_EXEC_ERROR'>>> {
         return tryCatchAsync(async () => {
-            const targetFiles = proposal.files && proposal.files.length > 0
-                ? proposal.files
-                : allFiles
-                    .map(f => f.path)
-                    .filter(p => !p.includes('.temp/') && !p.startsWith('.release-notes-'));
+            // F4: require explicit file list. No fallback to allFiles.
+            //
+            // NOTE: tryCatchAsync from @mks2508/no-throw only catches
+            // thrown errors, NOT returned err(...) values. To surface
+            // an error from inside this callback, we MUST throw — a
+            // bare `return err(...)` would be silently wrapped in `ok()`
+            // and the spinner would falsely report success.
+            if (!proposal.files || proposal.files.length === 0) {
+                const titlePreview = proposal.title.split('\n')[0];
+                log.warn(
+                    `Proposal "${titlePreview}" has no files declared. ` +
+                    'Skipping. (AI response must include ### Archivos de la Propuesta #N.)',
+                );
+                throw new Error(
+                    `MISSING_PROPOSAL_FILES: proposal "${titlePreview}" did not declare target files`,
+                );
+            }
 
+            const targetFiles = proposal.files;
+
+            // Validate every declared file is actually tracked / staged
             for (const file of targetFiles) {
-                const addResult = await this.gitCommand(['add', file]);
+                const stagedResult = await this.gitCommand([
+                    'ls-files', '--error-unmatch', '--', file,
+                ]);
+                if (isErr(stagedResult)) {
+                    throw new Error(
+                        `FILE_NOT_IN_INDEX: file '${file}' is not in the index. ` +
+                        'Re-run with the correct staging mode or pass --all to include untracked files.',
+                    );
+                }
+            }
+
+            // Stage each declared file explicitly (no blanket add)
+            for (const file of targetFiles) {
+                const addResult = await this.gitCommand(['add', '--', file]);
                 if (isErr(addResult)) {
                     log.warn(`Could not stage ${file}: ${addResult.error.message}`);
                 }
@@ -426,48 +547,151 @@ export class CommitGenerator {
                 return false;
             }
 
+            // F22: build commit message and write to temp file to avoid
+            // shell escaping bugs. Use `git commit -F <file>`.
             let commitMessage = proposal.title;
             if (proposal.description) commitMessage += `\n\n${proposal.description}`;
             if (proposal.technical) commitMessage += `\n\n<technical>\n${proposal.technical}\n</technical>`;
             if (proposal.changelog) commitMessage += `\n\n<changelog>\n${proposal.changelog}\n</changelog>`;
 
-            const commitResult = await this.gitCommand(['commit', '-m', commitMessage]);
-            if (isErr(commitResult)) throw new Error(commitResult.error.message);
+            const messagePath = join(this.projectRoot, '.temp', `commit-msg-${Date.now()}.txt`);
+            writeFileSync(messagePath, commitMessage, 'utf-8');
+
+            try {
+                const commitResult = await this.gitCommand(['commit', '-F', messagePath]);
+                if (isErr(commitResult)) throw new Error(commitResult.error.message);
+            } finally {
+                // Clean up the temp message file
+                try {
+                    const { unlinkSync } = await import('fs');
+                    unlinkSync(messagePath);
+                } catch {
+                    // ignore cleanup errors
+                }
+            }
+
             return true;
         }, 'COMMIT_EXEC_ERROR');
     }
 
     /**
      * Push commits to remote.
+     *
+     * v2.0: branch is no longer hardcoded to `master`. We resolve the
+     * current branch via `git branch --show-current` and push that.
+     * In agent/CI mode (`isAgent`), the prompt is skipped and a warning
+     * is logged before pushing. In interactive mode, a confirmation
+     * prompt is always shown, with an extra confirmation when the
+     * branch is `master` or `main`.
+     *
+     * @param commitCount - Number of commits about to be pushed (for the prompt)
      * @returns Result indicating success or GIT_ERROR
      */
-    private async pushCommits(): Promise<Result<boolean, ResultError<'GIT_ERROR'>>> {
+    private async pushCommits(
+        commitCount: number,
+    ): Promise<Result<boolean, ResultError<'GIT_ERROR'>>> {
         if (this.options.noPush) {
+            log.info('Push skipped (--no-push or no --confirm-push flag)');
             return ok(false);
         }
 
-        const sp = log.spinner('Pushing...');
+        if (commitCount === 0) {
+            log.info('Push skipped (no commits to push)');
+            return ok(false);
+        }
+
+        // Resolve the current branch (no longer hardcoded)
+        const branchResult = await this.gitCommand(['branch', '--show-current']);
+        if (isErr(branchResult)) {
+            return err({
+                type: 'GIT_ERROR',
+                message: `Could not resolve current branch: ${branchResult.error.message}`,
+            } as any);
+        }
+        const currentBranch = branchResult.value || 'HEAD';
+
+        // Resolve the remote for the current branch (fall back to 'origin')
+        let remote = 'origin';
+        const remoteResult = await this.gitCommand([
+            'config', '--get', `branch.${currentBranch}.remote`,
+        ]);
+        if (!isErr(remoteResult) && remoteResult.value) {
+            remote = remoteResult.value;
+        }
+
+        const isProtectedBranch = currentBranch === 'master' || currentBranch === 'main';
+        const isCI = this.caps.environment === 'ci' || this.options.isAgent;
+
+        // Always prompt before push. In agent mode, prompt is replaced
+        // by an explicit log warning so the decision is traceable.
+        if (isCI) {
+            log.warn(
+                `About to push ${commitCount} commit(s) to ${remote}/${currentBranch}` +
+                (isProtectedBranch ? ' [PROTECTED BRANCH]' : '') +
+                (this.options.isAgent ? ' [AGENT MODE]' : ''),
+            );
+        } else {
+            const { confirm } = await import('@inquirer/prompts');
+            const ok = await confirm({
+                message: `Push ${commitCount} commit(s) to ${remote}/${currentBranch}?` +
+                    (isProtectedBranch ? ' [PROTECTED BRANCH]' : ''),
+                default: false,
+            });
+            if (!ok) {
+                log.info('Push cancelled by user');
+                return ok(false);
+            }
+
+            if (isProtectedBranch) {
+                const confirmProtected = await confirm({
+                    message: `You are pushing to the protected branch "${currentBranch}". ` +
+                        'Are you absolutely sure?',
+                    default: false,
+                });
+                if (!confirmProtected) {
+                    log.info('Push to protected branch cancelled');
+                    return ok(false);
+                }
+            }
+        }
+
+        const sp = log.spinner(`Pushing to ${remote}/${currentBranch}...`);
         sp.start();
-        const result = await this.gitCommand(['push', 'origin', 'master']);
+        const result = await this.gitCommand(['push', remote, currentBranch]);
         if (isErr(result)) {
             sp.fail('Push failed');
             log.warn('Commits are in your local repository');
             return result;
         }
-        sp.succeed('Pushed');
+        sp.succeed(`Pushed ${commitCount} commit(s) to ${remote}/${currentBranch}`);
         return ok(true);
     }
 
     /**
      * Validate that auto-approve is safe to execute.
-     * @returns Whether it's safe to proceed
+     *
+     * v2.0: now performs a basic blast-radius check before letting
+     * `autoApprove` proceed. Checks:
+     * 1. Current branch resolves cleanly
+     * 2. No unresolved merge conflicts
+     * 3. Branch is not detached HEAD
+     *
+     * The branch-protection warning (master/main) is logged but does
+     * NOT block — that gate lives in `pushCommits()` so it can fire
+     * per-push instead of per-run.
+     *
+     * @returns Whether it's safe to proceed with auto-approve
      */
     private async validateAutoApprove(): Promise<boolean> {
         const branchResult = await this.gitCommand(['branch', '--show-current']);
         if (isErr(branchResult)) return false;
-        if (branchResult.value !== 'master') {
-            log.warn(`Not on master branch (current: ${branchResult.value})`);
+        if (!branchResult.value) {
+            log.error('Detached HEAD — auto-approve refused');
             return false;
+        }
+        const branch = branchResult.value;
+        if (branch === 'master' || branch === 'main') {
+            log.warn(`Auto-approve on protected branch "${branch}". Proceed with care.`);
         }
 
         const statusResult = await this.gitCommand(['status', '--porcelain']);
@@ -515,15 +739,20 @@ export class CommitGenerator {
             log.divider();
         }
 
-        // Step 1: Analyze repository
-        const stageSpinner = log.spinner('Staging...');
+        // Step 1: Resolve staging decision (replaces blanket `git add -A`)
+        const stageSpinner = log.spinner('Resolving staging...');
         stageSpinner.start();
-        const stageResult = await this.stageAllChanges();
-        if (isErr(stageResult)) {
-            stageSpinner.fail('Failed to stage changes');
-            return stageResult as any;
+        const stagingResult = await this.resolveAndApplyStaging();
+        if (isErr(stagingResult)) {
+            stageSpinner.fail('Staging failed');
+            return stagingResult as any;
         }
-        stageSpinner.succeed('Changes staged');
+        const totalStaged = stagingResult.value.toStage.length + stagingResult.value.alreadyStaged.length;
+        stageSpinner.succeed(
+            totalStaged > 0
+                ? `Staged ${totalStaged} file${totalStaged !== 1 ? 's' : ''} (${stagingResult.value.reason})`
+                : 'No files staged',
+        );
 
         const repoSpinner = log.spinner('Analyzing repository...');
         repoSpinner.start();
@@ -637,7 +866,7 @@ export class CommitGenerator {
             for (let i = 0; i < proposals.length; i++) {
                 const commitSpinner = log.spinner(`Commit ${i + 1}/${proposals.length}...`);
                 commitSpinner.start();
-                const commitResult = await this.executeCommit(proposals[i], files);
+                const commitResult = await this.executeCommit(proposals[i]);
                 if (isErr(commitResult) || !commitResult.value) {
                     commitSpinner.fail('Commit failed');
                 } else {
@@ -646,13 +875,14 @@ export class CommitGenerator {
                 }
             }
 
-            // Step 5: Push
+            // Step 5: Push (only if --confirm-push was passed; --noPush default)
             if (commitCount > 0) {
-                const pushResult = await this.pushCommits();
+                const pushResult = await this.pushCommits(commitCount);
                 pushed = !isErr(pushResult) && pushResult.value;
             }
-        } else {
-            log.info('Use --auto-approve to execute commits');
+        } else if (!this.options.isAgent) {
+            log.info('Pass --auto-approve (or -y) to execute the proposed commits. ' +
+                'Add --confirm-push to also push to the remote.');
         }
 
         const elapsed = Date.now() - startTime;

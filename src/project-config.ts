@@ -165,15 +165,61 @@ function detectPlatform(pkg: any): string {
 
 /**
  * Ultimate fallback when no package.json exists.
+ *
+ * Scans the project root for tell-tale files (Cargo.toml, pyproject.toml,
+ * go.mod, etc.) to detect the tech stack and platform, rather than
+ * defaulting to "Unknown Project" + "Cross-platform".
+ *
  * @param projectRoot - Project root directory
  * @returns Fallback project configuration
  */
 function fallbackConfig(projectRoot: string): IProjectConfig {
+    const { existsSync } = require('fs') as typeof import('fs');
+    const { join } = require('path') as typeof import('path');
+
     const dirName = projectRoot.split('/').pop() || 'project';
     log.info(`Using fallback config for "${dirName}"`);
+
+    const techStack: string[] = [];
+    let targetPlatform: 'Web (Frontend)' | 'Server (Backend)' | 'Desktop (Tauri)' | 'CLI' | 'Library' | 'Cross-platform' = 'Cross-platform';
+
+    if (existsSync(join(projectRoot, 'Cargo.toml'))) {
+        techStack.push('Rust');
+    }
+    if (existsSync(join(projectRoot, 'pyproject.toml')) || existsSync(join(projectRoot, 'requirements.txt'))) {
+        techStack.push('Python');
+    }
+    if (existsSync(join(projectRoot, 'go.mod'))) {
+        techStack.push('Go');
+    }
+    if (existsSync(join(projectRoot, 'bun.lock')) || existsSync(join(projectRoot, 'bun.lockb'))) {
+        techStack.push('Bun');
+    } else if (existsSync(join(projectRoot, 'package-lock.json')) || existsSync(join(projectRoot, 'yarn.lock'))) {
+        techStack.push('Node.js');
+    }
+    if (existsSync(join(projectRoot, 'tsconfig.json'))) {
+        techStack.push('TypeScript');
+    }
+    if (existsSync(join(projectRoot, 'src-tauri', 'Cargo.toml'))) {
+        techStack.push('Tauri');
+        targetPlatform = 'Desktop (Tauri)';
+    }
+    if (existsSync(join(projectRoot, 'index.html')) || existsSync(join(projectRoot, 'public'))) {
+        if (targetPlatform === 'Cross-platform') targetPlatform = 'Web (Frontend)';
+    }
+
+    if (techStack.length === 0) techStack.push('Unknown');
+    if (techStack.length === 1 && techStack[0] === 'TypeScript') {
+        // TS alone is ambiguous. Default to Library when src/ exists.
+        if (targetPlatform === 'Cross-platform') {
+            targetPlatform = existsSync(join(projectRoot, 'src')) ? 'Library' : 'Cross-platform';
+        }
+    }
 
     return fillDefaults({
         name: dirName,
         description: `Project at ${projectRoot}`,
+        techStack,
+        targetPlatform,
     });
 }

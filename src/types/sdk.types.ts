@@ -10,10 +10,19 @@ import type { Result } from '@mks2508/no-throw';
 /**
  * Options for creating a CommitGenerator instance.
  *
+ * v2.0: added `stagingMode`, `addFiles`, and `isAgent` to support the
+ * new staging control flow and agent/CI integration.
+ *
  * @example
  * ```typescript
+ * // Interactive: prompts for staging + confirmation
+ * const generator = new CommitGenerator({ provider: 'groq' });
+ *
+ * // Agent/CI: explicit staging, no prompts, errors on ambiguity
  * const generator = new CommitGenerator({
  *   provider: 'groq',
+ *   stagingMode: 'staged-only',
+ *   isAgent: true,
  *   autoApprove: true,
  *   noPush: true,
  * });
@@ -26,10 +35,25 @@ export interface ICommitGeneratorOptions {
     provider?: ProviderName;
     /** Override the default model for the selected provider */
     model?: string;
-    /** Auto-approve commit proposals without prompting */
+    /**
+     * Auto-approve commit proposals without prompting.
+     * @defaultValue false (in v2.0; was true in v1.x)
+     */
     autoApprove?: boolean;
-    /** Skip git push after committing */
+    /**
+     * Skip git push after committing. Push is opt-in via --confirm-push.
+     * @defaultValue true (in v2.0; was false in v1.x)
+     */
     noPush?: boolean;
+    /** Staging strategy. Required when `isAgent` is true. */
+    stagingMode?: 'all' | 'staged-only' | 'select' | 'specific';
+    /** File paths when `stagingMode === 'specific'` */
+    addFiles?: string[];
+    /**
+     * Agent/CI mode: skip all prompts and error on ambiguity.
+     * Required for non-interactive runs.
+     */
+    isAgent?: boolean;
     /** Perform exhaustive analysis (include full file diffs) */
     exhaustive?: boolean;
     /** Additional context describing the changes */

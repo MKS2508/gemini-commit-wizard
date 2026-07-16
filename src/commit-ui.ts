@@ -249,6 +249,14 @@ class CommitUI {
     /**
      * Run the full interactive commit flow.
      * Collects info, shows summary, then delegates to CommitGenerator.
+     *
+     * v2.0: no longer hardcodes `autoApprove: true`. The flow is:
+     * 1. Collect context (UI dialogs / terminal prompts)
+     * 2. Show summary
+     * 3. Confirm execution (apply proposed commits)
+     * 4. Optionally confirm push (separate gate)
+     *
+     * Pass `--confirm-push` via the CLI to enable the push step.
      */
     async run(): Promise<void> {
         const options = await this.collectCommitInfo();
@@ -280,6 +288,20 @@ class CommitUI {
             return idx > -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : undefined;
         };
 
+        const cliConfirmed = cliArgs.includes('--auto-approve') || cliArgs.includes('-y');
+
+        if (!cliConfirmed) {
+            const { confirm } = await import('@inquirer/prompts');
+            const proceed = await confirm({
+                message: 'Generate commit proposals with these details?',
+                default: true,
+            });
+            if (!proceed) {
+                log.info('Cancelled by user');
+                process.exit(0);
+            }
+        }
+
         const generator = new CommitGenerator({
             ...this.baseOptions,
             provider: getArg('--provider') as any,
@@ -287,7 +309,10 @@ class CommitUI {
             context: options.context,
             workType: options.workType,
             affectedComponents: options.affectedComponents.join(','),
-            autoApprove: true,
+            // v2.0: autoApprove mirrors the user's CLI choice. UI no longer
+            // sets it to true unconditionally.
+            autoApprove: cliConfirmed,
+            noPush: !cliArgs.includes('--confirm-push'),
         });
 
         const result = await generator.generate();
@@ -305,11 +330,15 @@ async function main() {
     const ui = new CommitUI();
 
     if (process.argv.includes('--quick')) {
+        // Quick mode: still requires --confirm-push for push, but auto-approves commits.
+        const cliArgs = process.argv.slice(2);
+        const autoApprove = cliArgs.includes('--auto-approve') || cliArgs.includes('-y');
         const generator = new CommitGenerator({
             context: 'Quick commit via UI',
             workType: 'feature',
             affectedComponents: 'core',
-            autoApprove: true,
+            autoApprove,
+            noPush: !cliArgs.includes('--confirm-push'),
         });
         const result = await generator.generate();
         if (isErr(result)) {
